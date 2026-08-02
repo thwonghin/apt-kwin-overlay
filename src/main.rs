@@ -1,3 +1,6 @@
+mod kwin_tracker;
+mod shortcuts;
+
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -5,11 +8,16 @@ use gtk4::cairo::{RectangleInt, Region};
 use gtk4::prelude::*;
 use gtk4::{glib, Application, ApplicationWindow, Button, Overlay};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use kwin_tracker::TrackerEvent;
 use webkit6::prelude::*;
 use webkit6::WebView;
 
 const APP_ID: &str = "dev.spike.apt_wayland_overlay";
-const APT_URL: &str = "http://127.0.0.1:8584/index.html";
+// ponytail: hardcoded to whatever port APT happened to bind this run
+// (checked via `ss -ltnp | grep awaken`) since it wasn't launched with
+// --listen. Switch back to a fixed --listen port for anything beyond
+// this one-off test.
+const APT_URL: &str = "http://127.0.0.1:42915/index.html";
 
 fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
@@ -42,34 +50,12 @@ fn build_ui(app: &Application) {
     toggle.set_margin_top(12);
     toggle.set_margin_end(12);
 
-    // `can-target` only affects GTK's own internal hit-testing, not the input
-    // region the compositor is told about — that requires poking the surface
-    // directly, or clicks keep landing on our window no matter what.
     let click_through = Rc::new(Cell::new(false));
     let window_for_toggle = window.clone();
-    toggle.connect_clicked(move |btn| {
-        let Some(surface) = window_for_toggle.surface() else { return };
-        let now_click_through = !click_through.get();
-        click_through.set(now_click_through);
-
-        if now_click_through {
-            // Empty input region except for the toggle button itself, so it's
-            // still reachable to flip this back off.
-            let region = Region::create();
-            if let Some(bounds) = btn.compute_bounds(&window_for_toggle) {
-                let _ = region.union_rectangle(&RectangleInt::new(
-                    bounds.x() as i32,
-                    bounds.y() as i32,
-                    bounds.width() as i32,
-                    bounds.height() as i32,
-                ));
-            }
-            surface.set_input_region(Some(&region));
-            btn.set_label("click-through: ON");
-        } else {
-            surface.set_input_region(None);
-            btn.set_label("click-through: OFF");
-        }
+    let toggle_for_click = toggle.clone();
+    let click_through_for_click = click_through.clone();
+    toggle.connect_clicked(move |_btn| {
+        toggle_click_through(&window_for_toggle, &toggle_for_click, &click_through_for_click);
     });
 
     let overlay = Overlay::new();
@@ -88,4 +74,51 @@ fn build_ui(app: &Application) {
     );
 
     window.present();
+
+    shortcuts::spawn(window.clone(), toggle.clone(), click_through.clone());
+
+    let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
+    kwin_tracker::spawn(sender);
+    glib::spawn_future_local(async move {
+        while let Ok(event) = receiver.recv().await {
+            match event {
+                TrackerEvent::Activated(w) => println!(
+                    "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
+                    w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
+                ),
+                TrackerEvent::GeometryChanged(w) => println!(
+                    "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
+                    w.class_name, w.caption, w.width, w.height, w.x, w.y
+                ),
+            }
+        }
+    });
+}
+
+/// `can-target` only affects GTK's own internal hit-testing, not the input
+/// region the compositor is told about — that requires poking the surface
+/// directly, or clicks keep landing on our window no matter what.
+fn toggle_click_through(window: &ApplicationWindow, toggle: &Button, click_through: &Rc<Cell<bool>>) {
+    let Some(surface) = window.surface() else { return };
+    let now_click_through = !click_through.get();
+    click_through.set(now_click_through);
+
+    if now_click_through {
+        // Empty input region except for the toggle button itself, so it's
+        // still reachable to flip this back off.
+        let region = Region::create();
+        if let Some(bounds) = toggle.compute_bounds(window) {
+            let _ = region.union_rectangle(&RectangleInt::new(
+                bounds.x() as i32,
+                bounds.y() as i32,
+                bounds.width() as i32,
+                bounds.height() as i32,
+            ));
+        }
+        surface.set_input_region(Some(&region));
+        toggle.set_label("click-through: ON");
+    } else {
+        surface.set_input_region(None);
+        toggle.set_label("click-through: OFF");
+    }
 }
