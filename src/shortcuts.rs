@@ -1,13 +1,16 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::WindowIdentifier;
 use futures_util::StreamExt;
 use gtk4::{glib, ApplicationWindow, Button};
+use serde_json::json;
 
 use crate::remote_input::RemoteInput;
+use crate::server::EventBus;
 use crate::toggle_click_through;
 
 const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
@@ -19,6 +22,7 @@ pub fn spawn(
     click_through: Rc<Cell<bool>>,
     kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
+    events: Arc<EventBus>,
 ) {
     glib::spawn_future_local(async move {
         if let Err(err) = run(
@@ -27,6 +31,7 @@ pub fn spawn(
             &click_through,
             &kwin_connection,
             &remote_input,
+            &events,
         )
         .await
         {
@@ -41,6 +46,7 @@ async fn run(
     click_through: &Rc<Cell<bool>>,
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
+    events: &Arc<EventBus>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy.create_session(CreateSessionOptions::default()).await?;
@@ -74,7 +80,7 @@ async fn run(
     while let Some(event) = activated.next().await {
         match event.shortcut_id() {
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through),
-            PRICE_CHECK_ID => price_check(kwin_connection, remote_input).await,
+            PRICE_CHECK_ID => price_check(kwin_connection, remote_input, events).await,
             _ => {}
         }
     }
@@ -85,15 +91,25 @@ async fn run(
 async fn price_check(
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
+    events: &Arc<EventBus>,
 ) {
-    let connection = kwin_connection.borrow().clone();
-    match connection {
-        Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
-            Ok((x, y)) => println!("[shortcuts] price-check cursor at ({x}, {y})"),
-            Err(err) => eprintln!("[shortcuts] price-check cursor query failed: {err}"),
-        },
-        None => eprintln!("[shortcuts] price-check: kwin connection not ready yet"),
-    }
+    let cursor = {
+        let connection = kwin_connection.borrow().clone();
+        match connection {
+            Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
+                Ok(pos) => Some(pos),
+                Err(err) => {
+                    eprintln!("[shortcuts] price-check cursor query failed: {err}");
+                    None
+                }
+            },
+            None => {
+                eprintln!("[shortcuts] price-check: kwin connection not ready yet");
+                None
+            }
+        }
+    };
+    let (x, y) = cursor.unwrap_or((0.0, 0.0));
 
     let remote_ref = remote_input.borrow();
     let Some(remote) = remote_ref.as_ref() else {
@@ -112,9 +128,29 @@ async fn price_check(
     // gdk::Clipboard only reliably reflects content while our own window has
     // had keyboard focus (Wayland gates clipboard visibility by focus) — use
     // the portal's clipboard instead, which works regardless of local focus.
-    match remote.read_clipboard_text().await {
-        Ok(Some(text)) => println!("[shortcuts] price-check clipboard:\n{text}"),
-        Ok(None) => println!("[shortcuts] price-check clipboard: empty"),
-        Err(err) => eprintln!("[shortcuts] price-check clipboard read failed: {err}"),
-    }
+    let clipboard = match remote.read_clipboard_text().await {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            println!("[shortcuts] price-check clipboard: empty");
+            return;
+        }
+        Err(err) => {
+            eprintln!("[shortcuts] price-check clipboard read failed: {err}");
+            return;
+        }
+    };
+
+    // "price-check" is the target the renderer's PriceCheckWindow.vue
+    // actually listens for; focusOverlay: true skips its
+    // hide-on-mouse-leave area-tracking path (OVERLAY->MAIN::track-area),
+    // which isn't wired up yet.
+    events.send_last_active(
+        "MAIN->CLIENT::item-text",
+        json!({
+            "target": "price-check",
+            "clipboard": clipboard,
+            "position": { "x": x, "y": y },
+            "focusOverlay": true,
+        }),
+    );
 }

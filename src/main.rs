@@ -1,6 +1,11 @@
+mod config_store;
 mod kwin_tracker;
+mod logger;
+mod proxy;
 mod remote_input;
+mod server;
 mod shortcuts;
+mod uploads;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,11 +19,6 @@ use webkit6::prelude::*;
 use webkit6::WebView;
 
 pub(crate) const APP_ID: &str = "dev.spike.apt_wayland_overlay";
-// ponytail: hardcoded to whatever port APT happened to bind this run
-// (checked via `ss -ltnp | grep awaken`) since it wasn't launched with
-// --listen. Switch back to a fixed --listen port for anything beyond
-// this one-off test.
-const APT_URL: &str = "http://127.0.0.1:42915/index.html";
 
 fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
@@ -47,9 +47,20 @@ fn build_ui(app: &Application) {
     // which works regardless of local focus — so this can stay None.
     window.set_keyboard_mode(KeyboardMode::None);
 
+    let (port, backend) = server::spawn().expect("failed to start local server");
+    println!("[main] server listening on 127.0.0.1:{port}");
+
     let webview = WebView::new();
     webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
-    webview.load_uri(APT_URL);
+    // The renderer only enables overlay-mode behavior (vs. plain-browser
+    // mode) when navigator.userAgent contains "Electron"
+    // (renderer/src/web/background/IPC.ts) — we're WebKitGTK, not Electron,
+    // so without this it would silently fall back to browser mode.
+    if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
+        let ua = settings.user_agent().map(|s| s.to_string()).unwrap_or_default();
+        settings.set_user_agent(Some(&format!("{ua} Electron/32.0.0")));
+    }
+    webview.load_uri(&format!("http://127.0.0.1:{port}/"));
 
     let toggle = Button::with_label("click-through: OFF");
     toggle.set_halign(gtk4::Align::End);
@@ -116,6 +127,7 @@ fn build_ui(app: &Application) {
         let click_through = click_through.clone();
         let kwin_connection = kwin_connection.clone();
         let remote_input = remote_input.clone();
+        let events = backend.events.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -135,7 +147,7 @@ fn build_ui(app: &Application) {
                 Err(err) => eprintln!("[main] remote_input setup failed: {err}"),
             }
 
-            shortcuts::spawn(window, toggle, click_through, kwin_connection, remote_input);
+            shortcuts::spawn(window, toggle, click_through, kwin_connection, remote_input, events);
         });
     }
 }

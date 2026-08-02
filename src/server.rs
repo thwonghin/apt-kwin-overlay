@@ -1,0 +1,344 @@
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::config_store::ConfigStore;
+use crate::logger::Logger;
+
+const DIST_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/awakened-poe-trade/renderer/dist");
+
+type ClientId = u64;
+
+struct Client {
+    ws: Mutex<tungstenite::WebSocket<TcpStream>>,
+}
+
+pub struct EventBus {
+    clients: Mutex<HashMap<ClientId, Arc<Client>>>,
+    last_active: Mutex<Option<ClientId>>,
+    next_id: AtomicU64,
+}
+
+impl EventBus {
+    fn new() -> Self {
+        Self {
+            clients: Mutex::new(HashMap::new()),
+            last_active: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn add_client(&self, ws: tungstenite::WebSocket<TcpStream>) -> ClientId {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.clients.lock().unwrap().insert(
+            id,
+            Arc::new(Client {
+                ws: Mutex::new(ws),
+            }),
+        );
+        *self.last_active.lock().unwrap() = Some(id);
+        id
+    }
+
+    fn remove_client(&self, id: ClientId) {
+        self.clients.lock().unwrap().remove(&id);
+        let mut last_active = self.last_active.lock().unwrap();
+        if *last_active == Some(id) {
+            let remaining = self.clients.lock().unwrap();
+            *last_active = remaining.keys().next().copied();
+            if let Some(sole_id) = *last_active {
+                if remaining.len() == 1 {
+                    drop(remaining);
+                    drop(last_active);
+                    self.mark_active(sole_id);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn mark_active(&self, id: ClientId) {
+        *self.last_active.lock().unwrap() = Some(id);
+    }
+
+    fn send_to(&self, client: &Arc<Client>, msg: &str) {
+        let mut ws = client.ws.lock().unwrap();
+        // WouldBlock is expected (read-timeout keeps the connection thread's
+        // blocking read from starving concurrent senders forever); anything
+        // else means the connection's dead, drop it silently.
+        let _ = ws.send(tungstenite::Message::Text(msg.into()));
+    }
+
+    pub fn broadcast(&self, name: &str, payload: Value) {
+        let msg = json!({ "name": name, "payload": payload }).to_string();
+        let clients: Vec<_> = self.clients.lock().unwrap().values().cloned().collect();
+        for client in clients {
+            self.send_to(&client, &msg);
+        }
+    }
+
+    pub fn send_last_active(&self, name: &str, payload: Value) {
+        let msg = json!({ "name": name, "payload": payload }).to_string();
+        let target = self
+            .last_active
+            .lock()
+            .unwrap()
+            .and_then(|id| self.clients.lock().unwrap().get(&id).cloned());
+        if let Some(client) = target {
+            self.send_to(&client, &msg);
+        }
+    }
+}
+
+pub struct Server {
+    pub events: Arc<EventBus>,
+    pub config: Arc<ConfigStore>,
+    pub logger: Arc<Logger>,
+}
+
+pub fn spawn() -> std::io::Result<(u16, Server)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+
+    let server = Server {
+        events: Arc::new(EventBus::new()),
+        config: Arc::new(ConfigStore::new()),
+        logger: Arc::new(Logger::new()),
+    };
+    let events = server.events.clone();
+    let config = server.config.clone();
+    let logger = server.logger.clone();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let events = events.clone();
+                    let config = config.clone();
+                    let logger = logger.clone();
+                    std::thread::spawn(move || {
+                        if let Err(err) = handle_connection(stream, &events, &config, &logger) {
+                            eprintln!("[server] connection error: {err}");
+                        }
+                    });
+                }
+                Err(err) => eprintln!("[server] accept error: {err}"),
+            }
+        }
+    });
+
+    Ok((port, server))
+}
+
+fn handle_connection(
+    stream: TcpStream,
+    events: &Arc<EventBus>,
+    config: &Arc<ConfigStore>,
+    logger: &Arc<Logger>,
+) -> std::io::Result<()> {
+    let mut peek_buf = [0u8; 1024];
+    let n = stream.peek(&mut peek_buf)?;
+    let first_line_end = peek_buf[..n]
+        .iter()
+        .position(|&b| b == b'\r')
+        .unwrap_or(n);
+    let first_line = &peek_buf[..first_line_end];
+
+    if first_line.starts_with(b"GET /events") {
+        return handle_websocket(stream, events, config, logger);
+    }
+
+    handle_http(stream, config)
+}
+
+fn handle_websocket(
+    stream: TcpStream,
+    events: &Arc<EventBus>,
+    config: &Arc<ConfigStore>,
+    logger: &Arc<Logger>,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let ws = match tungstenite::accept(stream) {
+        Ok(ws) => ws,
+        Err(err) => {
+            eprintln!("[server] websocket handshake failed: {err}");
+            return Ok(());
+        }
+    };
+
+    let id = events.add_client(ws);
+    println!("[server] websocket client {id} connected");
+    events.send_last_active(
+        "MAIN->CLIENT::log-entry",
+        json!({ "message": logger.history() }),
+    );
+
+    loop {
+        let client = match events.clients.lock().unwrap().get(&id).cloned() {
+            Some(client) => client,
+            None => break,
+        };
+
+        let msg = {
+            let mut ws = client.ws.lock().unwrap();
+            ws.read()
+        };
+
+        match msg {
+            Ok(tungstenite::Message::Text(text)) => {
+                handle_client_event(&text, id, events, config);
+            }
+            Ok(tungstenite::Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(ref io_err))
+                if io_err.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+
+    events.remove_client(id);
+    println!("[server] websocket client {id} disconnected");
+    Ok(())
+}
+
+fn handle_client_event(text: &str, from: ClientId, events: &Arc<EventBus>, config: &Arc<ConfigStore>) {
+    let Ok(event) = serde_json::from_str::<Value>(text) else {
+        eprintln!("[server] malformed client event: {text}");
+        return;
+    };
+    let Some(name) = event.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    let payload = event.get("payload").cloned().unwrap_or(Value::Null);
+
+    match name {
+        "CLIENT->MAIN::used-recently" => {
+            events.mark_active(from);
+        }
+        "CLIENT->MAIN::save-config" => {
+            let contents = payload.get("contents").and_then(Value::as_str).unwrap_or("");
+            let is_temporary = payload
+                .get("isTemporary")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            config.save(contents, is_temporary);
+            events.broadcast(
+                "MAIN->CLIENT::config-changed",
+                json!({ "contents": contents }),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn handle_http(stream: TcpStream, config: &Arc<ConfigStore>) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+
+    let mut headers: HashMap<String, String> = HashMap::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+
+    let mut stream = stream;
+    if path == "/config" {
+        let body = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "updater": { "state": "update-not-available", "checkedAt": 0 },
+            "contents": config.load(),
+        })
+        .to_string();
+        write_response(&mut stream, 200, "application/json", body.as_bytes())?;
+        return Ok(());
+    }
+
+    if path.starts_with("/uploads/") {
+        return crate::uploads::handle(&mut stream, &method, &path, &body);
+    }
+
+    if path.starts_with("/proxy/") {
+        return crate::proxy::handle(&mut stream, &method, &path, &headers, &body);
+    }
+
+    serve_static(&mut stream, &path)
+}
+
+fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
+    let path = if path == "/" { "/index.html" } else { path };
+    let file_path: PathBuf = Path::new(DIST_DIR).join(path.trim_start_matches('/'));
+
+    match std::fs::read(&file_path) {
+        Ok(bytes) => {
+            let content_type = match file_path.extension().and_then(|e| e.to_str()) {
+                Some("html") => Some("text/html"),
+                Some("js") => Some("text/javascript"),
+                Some("json") => Some("application/json"),
+                Some("svg") => Some("image/svg+xml"),
+                _ => None,
+            };
+            write_response(stream, 200, content_type.unwrap_or(""), &bytes)
+        }
+        Err(_) => write_response(stream, 404, "text/plain", b"not found"),
+    }
+}
+
+pub(crate) fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let status_text = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        _ => "Error",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if !content_type.is_empty() {
+        head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    Ok(())
+}
