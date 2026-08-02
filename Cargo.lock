@@ -33,6 +33,7 @@ dependencies = [
  "glib",
  "gtk4",
  "serde",
+ "serde_repr",
  "zbus",
 ]
 

@@ -1,7 +1,8 @@
 mod kwin_tracker;
+mod remote_input;
 mod shortcuts;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::cairo::{RectangleInt, Region};
@@ -75,10 +76,8 @@ fn build_ui(app: &Application) {
 
     window.present();
 
-    shortcuts::spawn(window.clone(), toggle.clone(), click_through.clone());
-
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
-    kwin_tracker::spawn(sender);
+    let conn_rx = kwin_tracker::spawn(sender);
     glib::spawn_future_local(async move {
         while let Ok(event) = receiver.recv().await {
             match event {
@@ -93,6 +92,46 @@ fn build_ui(app: &Application) {
             }
         }
     });
+
+    let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
+    {
+        let kwin_connection = kwin_connection.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(connection) = conn_rx.recv().await {
+                kwin_connection.replace(Some(connection));
+            }
+        });
+    }
+
+    let remote_input: Rc<RefCell<Option<remote_input::RemoteInput>>> = Rc::new(RefCell::new(None));
+    {
+        let window = window.clone();
+        let toggle = toggle.clone();
+        let click_through = click_through.clone();
+        let kwin_connection = kwin_connection.clone();
+        let remote_input = remote_input.clone();
+        glib::spawn_future_local(async move {
+            // Launched from a terminal (no systemd app-scope), so the portal
+            // can't derive our app id on its own — register it explicitly
+            // first, once, or every app-id-gated portal call (GlobalShortcuts,
+            // RemoteDesktop) fails with "An app id is required". The portal
+            // errors if this is called twice, so it happens exactly once here
+            // rather than inside shortcuts.rs or remote_input.rs.
+            if let Err(err) = ashpd::register_host_app(APP_ID.try_into().unwrap()).await {
+                eprintln!("[main] failed to register host app: {err}");
+                return;
+            }
+
+            match remote_input::RemoteInput::setup().await {
+                Ok(ri) => {
+                    remote_input.replace(Some(ri));
+                }
+                Err(err) => eprintln!("[main] remote_input setup failed: {err}"),
+            }
+
+            shortcuts::spawn(window, toggle, click_through, kwin_connection, remote_input);
+        });
+    }
 }
 
 /// `can-target` only affects GTK's own internal hit-testing, not the input
