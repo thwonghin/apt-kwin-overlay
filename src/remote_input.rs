@@ -2,10 +2,11 @@ use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 
+use ashpd::desktop::clipboard::{Clipboard, RequestClipboardOptions};
 use ashpd::desktop::remote_desktop::{ConnectToEISOptions, DeviceType, RemoteDesktop};
 use ashpd::desktop::{CreateSessionOptions, PersistMode, Session};
 use ashpd::enumflags2::BitFlags as AshpdBitFlags;
-use futures_util::StreamExt;
+use futures_util::{AsyncReadExt, StreamExt};
 use reis::enumflags2::BitFlags as EiBitFlags;
 use reis::event::{DeviceCapability, EiEvent};
 use reis::{ei, event};
@@ -40,6 +41,14 @@ pub struct RemoteInput {
     // values, not a hardcoded 0, since the EIS server likely uses them for
     // event ordering and may misorder/drop identically-timestamped events.
     start: std::time::Instant,
+    // Portal-based clipboard access (org.freedesktop.portal.Clipboard), tied
+    // to this RemoteDesktop session. Reading via GTK4's own gdk::Clipboard
+    // turned out to only work reliably while our own window had keyboard
+    // focus — Wayland gates clipboard visibility by focus for privacy, and
+    // our overlay is meant to never hold focus while the game does. This
+    // portal exists specifically so a RemoteDesktop-style session can read
+    // the clipboard regardless of local focus.
+    clipboard: Clipboard,
     // Kept alive, not otherwise used post-setup: dropping the D-Bus portal
     // session could tear down the EIS grant it authorized, even though the
     // raw EIS socket (`context`) is a separate connection.
@@ -64,6 +73,12 @@ impl RemoteInput {
             )
             .await?
             .response()?;
+
+        // Must be requested before the session starts (portal spec).
+        let clipboard = Clipboard::new().await?;
+        clipboard
+            .request(&session, RequestClipboardOptions::default())
+            .await?;
 
         let response = proxy
             .start(&session, None, Default::default())
@@ -138,8 +153,28 @@ impl RemoteInput {
             connection,
             keyboard,
             start: std::time::Instant::now(),
+            clipboard,
             session,
         })
+    }
+
+    pub async fn read_clipboard_text(&self) -> ashpd::Result<Option<String>> {
+        let fd = self
+            .clipboard
+            .selection_read(&self.session, "text/plain;charset=utf-8")
+            .await?;
+        let file = std::fs::File::from(std::os::fd::OwnedFd::from(fd));
+        let mut async_file =
+            async_io::Async::new(file).map_err(|err| ashpd::Error::IO(std::io::Error::other(err)))?;
+        let mut bytes = Vec::new();
+        async_file
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|err| ashpd::Error::IO(std::io::Error::other(err)))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     pub fn press_ctrl_c(&self) {

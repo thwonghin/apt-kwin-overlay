@@ -5,7 +5,6 @@ use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, Ne
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::WindowIdentifier;
 use futures_util::StreamExt;
-use gtk4::prelude::*;
 use gtk4::{glib, ApplicationWindow, Button};
 
 use crate::remote_input::RemoteInput;
@@ -75,7 +74,7 @@ async fn run(
     while let Some(event) = activated.next().await {
         match event.shortcut_id() {
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through),
-            PRICE_CHECK_ID => price_check(window, kwin_connection, remote_input).await,
+            PRICE_CHECK_ID => price_check(kwin_connection, remote_input).await,
             _ => {}
         }
     }
@@ -84,7 +83,6 @@ async fn run(
 }
 
 async fn price_check(
-    window: &ApplicationWindow,
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
 ) {
@@ -97,12 +95,18 @@ async fn price_check(
         None => eprintln!("[shortcuts] price-check: kwin connection not ready yet"),
     }
 
-    match remote_input.borrow().as_ref() {
-        Some(remote) => remote.press_ctrl_c(),
-        None => eprintln!("[shortcuts] price-check: remote input not ready yet"),
-    }
+    let remote_ref = remote_input.borrow();
+    let Some(remote) = remote_ref.as_ref() else {
+        eprintln!("[shortcuts] price-check: remote input not ready yet");
+        return;
+    };
 
-    match window.clipboard().read_text_future().await {
+    remote.press_ctrl_c();
+
+    // gdk::Clipboard only reliably reflects content while our own window has
+    // had keyboard focus (Wayland gates clipboard visibility by focus) — use
+    // the portal's clipboard instead, which works regardless of local focus.
+    match remote.read_clipboard_text().await {
         Ok(Some(text)) => println!("[shortcuts] price-check clipboard:\n{text}"),
         Ok(None) => println!("[shortcuts] price-check clipboard: empty"),
         Err(err) => eprintln!("[shortcuts] price-check clipboard read failed: {err}"),

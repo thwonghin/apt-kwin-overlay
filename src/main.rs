@@ -39,13 +39,12 @@ fn build_ui(app: &Application) {
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(-1);
-    // None, not OnDemand: nothing in this overlay needs real keyboard focus
-    // right now (no functional text entry yet) — everything keyboard-related
-    // goes through the GlobalShortcuts portal + RemoteDesktop injection
-    // instead. If this surface could ever hold keyboard focus, an injected
-    // Ctrl+C could land on our own WebView (an empty-selection copy there
-    // clobbers whatever was actually in the clipboard) instead of whatever
-    // window the user actually has focused.
+    // Confirmed via testing: a layer-shell surface that never holds keyboard
+    // focus also can't reliably read gdk::Clipboard (Wayland gates clipboard
+    // visibility by focus for privacy). Since the overlay is meant to never
+    // steal focus from the game, clipboard reads for the price-check flow go
+    // through the portal's Clipboard interface instead (remote_input.rs),
+    // which works regardless of local focus — so this can stay None.
     window.set_keyboard_mode(KeyboardMode::None);
 
     let webview = WebView::new();
