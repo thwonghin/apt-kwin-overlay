@@ -69,12 +69,12 @@ function emit(kind, w) {{
     }}));
 }}
 function hook(w) {{
-    w.frameGeometryChanged.connect(function () {{ emit("geometryChanged", w); }});
+    w.frameGeometryChanged.connect(function () {{ emit("GeometryChanged", w); }});
 }}
 workspace.windowList().forEach(hook);
 workspace.windowAdded.connect(hook);
-workspace.windowActivated.connect(function (w) {{ if (w) emit("activated", w); }});
-if (workspace.activeWindow) emit("activated", workspace.activeWindow);
+workspace.windowActivated.connect(function (w) {{ if (w) emit("Activated", w); }});
+if (workspace.activeWindow) emit("Activated", workspace.activeWindow);
 "#,
         dbus_addr = dbus_addr,
         path = CALLBACK_PATH,
