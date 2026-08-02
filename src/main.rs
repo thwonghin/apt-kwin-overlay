@@ -39,7 +39,14 @@ fn build_ui(app: &Application) {
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    // None, not OnDemand: nothing in this overlay needs real keyboard focus
+    // right now (no functional text entry yet) — everything keyboard-related
+    // goes through the GlobalShortcuts portal + RemoteDesktop injection
+    // instead. If this surface could ever hold keyboard focus, an injected
+    // Ctrl+C could land on our own WebView (an empty-selection copy there
+    // clobbers whatever was actually in the clipboard) instead of whatever
+    // window the user actually has focused.
+    window.set_keyboard_mode(KeyboardMode::None);
 
     let webview = WebView::new();
     webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));

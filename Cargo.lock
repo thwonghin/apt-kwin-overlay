@@ -12,6 +12,7 @@ dependencies = [
  "futures-util",
  "gtk4",
  "gtk4-layer-shell",
+ "reis",
  "serde",
  "serde_json",
  "webkit6",
@@ -997,6 +998,19 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "reis"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
+dependencies = [
+ "async-io",
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix",
+]
 
 [[package]]
 name = "rustc_version"

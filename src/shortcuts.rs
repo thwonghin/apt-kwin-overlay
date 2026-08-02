@@ -97,16 +97,8 @@ async fn price_check(
         None => eprintln!("[shortcuts] price-check: kwin connection not ready yet"),
     }
 
-    let ctrl_c_result = {
-        let remote_ref = remote_input.borrow();
-        match remote_ref.as_ref() {
-            Some(remote) => Some(remote.press_ctrl_c().await),
-            None => None,
-        }
-    };
-    match ctrl_c_result {
-        Some(Ok(())) => {}
-        Some(Err(err)) => eprintln!("[shortcuts] price-check ctrl+c injection failed: {err}"),
+    match remote_input.borrow().as_ref() {
+        Some(remote) => remote.press_ctrl_c(),
         None => eprintln!("[shortcuts] price-check: remote input not ready yet"),
     }
 
