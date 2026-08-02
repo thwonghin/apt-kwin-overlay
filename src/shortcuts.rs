@@ -24,6 +24,11 @@ async fn run(
     toggle: &Button,
     click_through: &Rc<Cell<bool>>,
 ) -> ashpd::Result<()> {
+    // Launched from a terminal (no systemd app-scope), so the portal can't
+    // derive our app id on its own — register it explicitly first, or every
+    // app-id-gated portal call fails with "An app id is required".
+    ashpd::register_host_app(crate::APP_ID.try_into()?).await?;
+
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy.create_session(CreateSessionOptions::default()).await?;
 

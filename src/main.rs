@@ -12,7 +12,7 @@ use kwin_tracker::TrackerEvent;
 use webkit6::prelude::*;
 use webkit6::WebView;
 
-const APP_ID: &str = "dev.spike.apt_wayland_overlay";
+pub(crate) const APP_ID: &str = "dev.spike.apt_wayland_overlay";
 // ponytail: hardcoded to whatever port APT happened to bind this run
 // (checked via `ss -ltnp | grep awaken`) since it wasn't launched with
 // --listen. Switch back to a fixed --listen port for anything beyond
