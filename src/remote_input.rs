@@ -36,6 +36,10 @@ pub struct RemoteInput {
     context: ei::Context,
     connection: event::Connection,
     keyboard: Rc<RefCell<Option<KeyboardHandle>>>,
+    // Reference point for frame() timestamps (microseconds, monotonic) — real
+    // values, not a hardcoded 0, since the EIS server likely uses them for
+    // event ordering and may misorder/drop identically-timestamped events.
+    start: std::time::Instant,
     // Kept alive, not otherwise used post-setup: dropping the D-Bus portal
     // session could tear down the EIS grant it authorized, even though the
     // raw EIS socket (`context`) is a separate connection.
@@ -89,29 +93,43 @@ impl RemoteInput {
         let keyboard = Rc::new(RefCell::new(None));
         {
             let keyboard = keyboard.clone();
+            let event_loop_context = context.clone();
             gtk4::glib::spawn_future_local(async move {
                 while let Some(result) = events.next().await {
-                    let Ok(event) = result else { continue };
+                    let event = match result {
+                        Ok(event) => event,
+                        Err(err) => {
+                            eprintln!("[remote_input] eis event stream error: {err}");
+                            continue;
+                        }
+                    };
+                    println!("[remote_input] eis event: {event:?}");
                     match event {
                         EiEvent::SeatAdded(added) => {
                             added
                                 .seat
                                 .bind_capabilities(EiBitFlags::from(DeviceCapability::Keyboard));
+                            let _ = event_loop_context.flush();
                         }
                         EiEvent::DeviceAdded(added) => {
                             if let Some(kbd) = added.device.interface::<ei::Keyboard>() {
+                                println!("[remote_input] keyboard device bound");
                                 keyboard.replace(Some(KeyboardHandle {
                                     device: added.device.device().clone(),
                                     keyboard: kbd,
                                 }));
+                            } else {
+                                println!("[remote_input] device added without keyboard interface");
                             }
                         }
                         EiEvent::DeviceResumed(resumed) => {
                             resumed.device.device().start_emulating(0, 0);
+                            let _ = event_loop_context.flush();
                         }
                         _ => {}
                     }
                 }
+                println!("[remote_input] eis event stream ended");
             });
         }
 
@@ -119,6 +137,7 @@ impl RemoteInput {
             context,
             connection,
             keyboard,
+            start: std::time::Instant::now(),
             session,
         })
     }
@@ -137,7 +156,8 @@ impl RemoteInput {
             (KEY_LEFTCTRL, ei::keyboard::KeyState::Released),
         ] {
             handle.keyboard.key(keycode, state);
-            handle.device.frame(self.connection.serial(), 0);
+            let timestamp = self.start.elapsed().as_micros() as u64;
+            handle.device.frame(self.connection.serial(), timestamp);
         }
         let _ = self.context.flush();
     }
