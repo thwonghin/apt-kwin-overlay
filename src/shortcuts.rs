@@ -103,6 +103,12 @@ async fn price_check(
 
     remote.press_ctrl_c();
 
+    // Injected keys go out over the EIS socket fire-and-forget — press_ctrl_c
+    // returning just means the events were queued/flushed, not that the
+    // target app has processed Ctrl+C and updated its clipboard yet. Without
+    // this, the read below races ahead and returns stale content.
+    glib::timeout_future(std::time::Duration::from_millis(150)).await;
+
     // gdk::Clipboard only reliably reflects content while our own window has
     // had keyboard focus (Wayland gates clipboard visibility by focus) — use
     // the portal's clipboard instead, which works regardless of local focus.
