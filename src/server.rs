@@ -24,15 +24,27 @@ pub struct EventBus {
     clients: Mutex<HashMap<ClientId, Arc<Client>>>,
     last_active: Mutex<Option<ClientId>>,
     next_id: AtomicU64,
+    // The renderer's own title-bar "x" button sends OVERLAY->MAIN::focus-game
+    // (real APT's `assertGameActive` handler) instead of just hiding itself
+    // locally — it expects the host to actually restore click-through/close
+    // our widgets in response. This channel carries that request from the WS
+    // connection's own thread over to the GTK main loop, which owns the
+    // window/click-through state needed to act on it.
+    focus_game_tx: async_channel::Sender<()>,
 }
 
 impl EventBus {
-    fn new() -> Self {
-        Self {
-            clients: Mutex::new(HashMap::new()),
-            last_active: Mutex::new(None),
-            next_id: AtomicU64::new(1),
-        }
+    fn new() -> (Self, async_channel::Receiver<()>) {
+        let (focus_game_tx, focus_game_rx) = async_channel::unbounded();
+        (
+            Self {
+                clients: Mutex::new(HashMap::new()),
+                last_active: Mutex::new(None),
+                next_id: AtomicU64::new(1),
+                focus_game_tx,
+            },
+            focus_game_rx,
+        )
     }
 
     fn add_client(&self, ws: tungstenite::WebSocket<TcpStream>) -> ClientId {
@@ -95,22 +107,29 @@ impl EventBus {
             self.send_to(&client, &msg);
         }
     }
+
+    fn request_focus_game(&self) {
+        let _ = self.focus_game_tx.try_send(());
+    }
 }
 
 pub struct Server {
     pub events: Arc<EventBus>,
     pub config: Arc<ConfigStore>,
     pub logger: Arc<Logger>,
+    pub focus_game_rx: async_channel::Receiver<()>,
 }
 
 pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
+    let (event_bus, focus_game_rx) = EventBus::new();
     let server = Server {
-        events: Arc::new(EventBus::new()),
+        events: Arc::new(event_bus),
         config: Arc::new(ConfigStore::new()),
         logger: Arc::new(Logger::new()),
+        focus_game_rx,
     };
     let events = server.events.clone();
     let config = server.config.clone();
@@ -224,6 +243,9 @@ fn handle_client_event(text: &str, from: ClientId, events: &Arc<EventBus>, confi
     match name {
         "CLIENT->MAIN::used-recently" => {
             events.mark_active(from);
+        }
+        "OVERLAY->MAIN::focus-game" => {
+            events.request_focus_game();
         }
         "CLIENT->MAIN::save-config" => {
             let contents = payload.get("contents").and_then(Value::as_str).unwrap_or("");

@@ -26,9 +26,28 @@ pub fn spawn(
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
     active_window: Rc<RefCell<Option<WindowEvent>>>,
+    focus_game_rx: async_channel::Receiver<()>,
 ) {
     let price_check_open = Rc::new(Cell::new(false));
     let price_check_locked = Rc::new(Cell::new(false));
+
+    {
+        let window = window.clone();
+        let toggle = toggle.clone();
+        let click_through = click_through.clone();
+        let events = events.clone();
+        let price_check_open = price_check_open.clone();
+        let price_check_locked = price_check_locked.clone();
+        glib::spawn_future_local(async move {
+            // The renderer's own title-bar "x" button sends this instead of
+            // just hiding itself locally (main/src/windowing/OverlayWindow.ts's
+            // assertGameActive handler for the same event) — it expects us to
+            // actually restore click-through and close whatever's open.
+            while focus_game_rx.recv().await.is_ok() {
+                close_all_ui(&window, &toggle, &click_through, &events, &price_check_open, &price_check_locked);
+            }
+        });
+    }
 
     glib::spawn_future_local(async move {
         if let Err(err) = run(
@@ -47,6 +66,25 @@ pub fn spawn(
             eprintln!("[shortcuts] error: {err}");
         }
     });
+}
+
+/// Force click-through back on and close any open overlay widgets, as an
+/// always-available safety hatch regardless of what's currently showing.
+/// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
+fn close_all_ui(
+    window: &ApplicationWindow,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
+    events: &Arc<EventBus>,
+    price_check_open: &Rc<Cell<bool>>,
+    price_check_locked: &Rc<Cell<bool>>,
+) {
+    if price_check_open.get() {
+        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        price_check_open.set(false);
+    }
+    price_check_locked.set(false);
+    set_click_through(true, window, toggle, click_through, events);
 }
 
 async fn run(

@@ -176,6 +176,7 @@ fn build_ui(app: &Application) {
         let remote_input = remote_input.clone();
         let events = backend.events.clone();
         let active_window = active_window.clone();
+        let focus_game_rx = backend.focus_game_rx.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -203,6 +204,7 @@ fn build_ui(app: &Application) {
                 remote_input,
                 events,
                 active_window,
+                focus_game_rx,
             );
         });
     }
