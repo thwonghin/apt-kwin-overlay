@@ -141,14 +141,19 @@ async fn run(
                 .await
             }
             ESCAPE_ID => {
+                println!("[shortcuts] escape fired, click_through={}", click_through.get());
                 if click_through.get() {
                     // Nothing of ours is showing, so there's nothing to
                     // close — but the portal grab still ate the keypress at
                     // the OS level regardless (can't bind a global shortcut
                     // conditionally), so forward it back in rather than
                     // silently swallowing the game's own Escape handling.
-                    if let Some(remote) = remote_input.borrow().as_ref() {
-                        remote.press_escape();
+                    match remote_input.borrow().as_ref() {
+                        Some(remote) => {
+                            println!("[shortcuts] forwarding escape to game");
+                            remote.press_escape();
+                        }
+                        None => println!("[shortcuts] escape: remote input not ready yet"),
                     }
                 } else {
                     escape_all(
