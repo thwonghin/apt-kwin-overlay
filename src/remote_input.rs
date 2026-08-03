@@ -21,7 +21,6 @@ use reis::{ei, event};
 // Connect itself uses. Keycodes stay evdev numbering either way.
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_C: u32 = 46;
-const KEY_ESC: u32 = 1;
 
 fn restore_token_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
@@ -184,19 +183,6 @@ impl RemoteInput {
             (KEY_C, ei::keyboard::KeyState::Press),
             (KEY_C, ei::keyboard::KeyState::Released),
             (KEY_LEFTCTRL, ei::keyboard::KeyState::Released),
-        ]);
-    }
-
-    /// Used when our global Escape shortcut fires but there's nothing of
-    /// ours to close (click-through already on) — the portal grab still
-    /// swallowed the keypress at the OS level regardless (global shortcuts
-    /// can't be bound conditionally), so this forwards it back into
-    /// whatever has real focus to avoid silently eating the game's own
-    /// Escape handling (menus, dialogs, etc).
-    pub fn press_escape(&self) {
-        self.press_keys(&[
-            (KEY_ESC, ei::keyboard::KeyState::Press),
-            (KEY_ESC, ei::keyboard::KeyState::Released),
         ]);
     }
 
