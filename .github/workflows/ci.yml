@@ -23,9 +23,12 @@ jobs:
     steps:
       - name: Install build dependencies
         # git must be installed before actions/checkout, since the
-        # container starts from a bare Arch image with no git.
+        # container starts from a bare Arch image with no git. Full -Syu,
+        # not -Sy: installing nodejs/etc. without upgrading the rest of the
+        # system risks a partial-upgrade ABI mismatch (e.g. node built
+        # against a newer glibc than the container's own libc).
         run: |
-          pacman -Sy --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel namcap
+          pacman -Syu --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel namcap
 
       - uses: actions/checkout@v4
         with:

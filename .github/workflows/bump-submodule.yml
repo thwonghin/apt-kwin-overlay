@@ -43,8 +43,10 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install build dependencies
+        # Full -Syu, not -Sy: see ci.yml -- avoids a partial-upgrade ABI
+        # mismatch between newly-installed packages and the container's libc.
         run: |
-          pacman -Sy --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel
+          pacman -Syu --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
