@@ -25,7 +25,7 @@ const KEY_C: u32 = 46;
 fn restore_token_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
     std::path::PathBuf::from(home)
-        .join(".local/share/apt-wayland-overlay/remote_desktop_restore_token")
+        .join(".local/share/apt-kwin-overlay/remote_desktop_restore_token")
 }
 
 struct KeyboardHandle {
@@ -101,7 +101,7 @@ impl RemoteInput {
             ei::Context::new(stream).map_err(|err| ashpd::Error::IO(std::io::Error::other(err)))?;
 
         let (connection, mut events) = context
-            .handshake_async_io("apt-wayland-overlay", ei::handshake::ContextType::Sender)
+            .handshake_async_io("apt-kwin-overlay", ei::handshake::ContextType::Sender)
             .await
             .map_err(|err| ashpd::Error::IO(std::io::Error::other(err.to_string())))?;
 

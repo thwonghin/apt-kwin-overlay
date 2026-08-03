@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use zbus::interface;
 
-const PLUGIN_NAME: &str = "apt-wayland-overlay-tracker";
-const CALLBACK_IFACE: &str = "dev.spike.apt_wayland_overlay.Callback";
+const PLUGIN_NAME: &str = "apt-kwin-overlay-tracker";
+const CALLBACK_IFACE: &str = "dev.spike.apt_kwin_overlay.Callback";
 const CALLBACK_PATH: &str = "/";
-const CURSOR_QUERY_IFACE: &str = "dev.spike.apt_wayland_overlay.CursorPosCallback";
+const CURSOR_QUERY_IFACE: &str = "dev.spike.apt_kwin_overlay.CursorPosCallback";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowEvent {
@@ -48,7 +48,7 @@ struct Callback {
     sender: async_channel::Sender<TrackerEvent>,
 }
 
-#[interface(name = "dev.spike.apt_wayland_overlay.Callback")]
+#[interface(name = "dev.spike.apt_kwin_overlay.Callback")]
 impl Callback {
     async fn activated(&self, json: String) {
         match serde_json::from_str::<WindowEvent>(&json) {
@@ -183,7 +183,7 @@ struct CursorPosCallback {
     sender: async_channel::Sender<(f64, f64)>,
 }
 
-#[interface(name = "dev.spike.apt_wayland_overlay.CursorPosCallback")]
+#[interface(name = "dev.spike.apt_kwin_overlay.CursorPosCallback")]
 impl CursorPosCallback {
     async fn cursor_pos(&self, json: String) {
         match serde_json::from_str::<CursorPos>(&json) {
@@ -204,7 +204,7 @@ pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f6
     static QUERY_COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = format!("/query{id}");
-    let plugin_name = format!("apt-wayland-overlay-cursor-{id}");
+    let plugin_name = format!("apt-kwin-overlay-cursor-{id}");
 
     let (tx, rx) = async_channel::bounded(1);
     connection

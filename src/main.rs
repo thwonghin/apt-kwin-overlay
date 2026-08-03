@@ -18,7 +18,7 @@ use kwin_tracker::TrackerEvent;
 use webkit6::prelude::*;
 use webkit6::WebView;
 
-pub(crate) const APP_ID: &str = "dev.spike.apt_wayland_overlay";
+pub(crate) const APP_ID: &str = "dev.spike.apt_kwin_overlay";
 
 fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
@@ -29,7 +29,7 @@ fn main() -> glib::ExitCode {
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("apt-wayland-overlay spike")
+        .title("apt-kwin-overlay spike")
         .build();
 
     window.init_layer_shell();

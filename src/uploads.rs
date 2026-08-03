@@ -8,7 +8,7 @@ use crate::server::write_response;
 
 fn uploads_dir() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".local/share/apt-wayland-overlay/uploads")
+    PathBuf::from(home).join(".local/share/apt-kwin-overlay/uploads")
 }
 
 pub fn handle(stream: &mut TcpStream, method: &str, path: &str, body: &[u8]) -> std::io::Result<()> {

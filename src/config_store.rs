@@ -11,7 +11,7 @@ pub struct ConfigStore {
 
 fn config_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set");
-    std::path::PathBuf::from(home).join(".local/share/apt-wayland-overlay/config.json")
+    std::path::PathBuf::from(home).join(".local/share/apt-kwin-overlay/config.json")
 }
 
 impl ConfigStore {
