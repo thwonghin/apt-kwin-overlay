@@ -112,22 +112,29 @@ fn build_ui(app: &Application) {
         });
     }
 
+    let active_window: Rc<RefCell<Option<kwin_tracker::WindowEvent>>> = Rc::new(RefCell::new(None));
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
     let conn_rx = kwin_tracker::spawn(sender);
-    glib::spawn_future_local(async move {
-        while let Ok(event) = receiver.recv().await {
-            match event {
-                TrackerEvent::Activated(w) => println!(
-                    "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
-                    w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
-                ),
-                TrackerEvent::GeometryChanged(w) => println!(
-                    "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
-                    w.class_name, w.caption, w.width, w.height, w.x, w.y
-                ),
+    {
+        let active_window = active_window.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(event) = receiver.recv().await {
+                match event {
+                    TrackerEvent::Activated(w) => {
+                        println!(
+                            "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
+                            w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
+                        );
+                        active_window.replace(Some(w));
+                    }
+                    TrackerEvent::GeometryChanged(w) => println!(
+                        "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
+                        w.class_name, w.caption, w.width, w.height, w.x, w.y
+                    ),
+                }
             }
-        }
-    });
+        });
+    }
 
     let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
     {
@@ -147,6 +154,7 @@ fn build_ui(app: &Application) {
         let kwin_connection = kwin_connection.clone();
         let remote_input = remote_input.clone();
         let events = backend.events.clone();
+        let active_window = active_window.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -166,7 +174,15 @@ fn build_ui(app: &Application) {
                 Err(err) => eprintln!("[main] remote_input setup failed: {err}"),
             }
 
-            shortcuts::spawn(window, toggle, click_through, kwin_connection, remote_input, events);
+            shortcuts::spawn(
+                window,
+                toggle,
+                click_through,
+                kwin_connection,
+                remote_input,
+                events,
+                active_window,
+            );
         });
     }
 }

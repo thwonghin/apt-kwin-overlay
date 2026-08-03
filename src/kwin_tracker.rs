@@ -8,7 +8,7 @@ const CALLBACK_IFACE: &str = "dev.spike.apt_wayland_overlay.Callback";
 const CALLBACK_PATH: &str = "/";
 const CURSOR_QUERY_IFACE: &str = "dev.spike.apt_wayland_overlay.CursorPosCallback";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WindowEvent {
     // Not read yet — kept for later matching a specific tracked window
     // (e.g. the real PoE window) across repeated geometry events.
@@ -22,6 +22,18 @@ pub struct WindowEvent {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+impl WindowEvent {
+    /// Steam/Proton and native Linux builds surface different resourceClass
+    /// values (e.g. "steam_app_238960" vs "PathOfExileSteam"), but the
+    /// window caption stays a human-readable "Path of Exile"/"Path of Exile
+    /// 2" either way — checking both catches either case.
+    pub fn is_path_of_exile(&self) -> bool {
+        let class = self.class_name.to_ascii_lowercase();
+        let caption = self.caption.to_ascii_lowercase();
+        class.contains("pathofexile") || caption.contains("path of exile")
+    }
 }
 
 #[derive(Debug)]

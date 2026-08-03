@@ -9,12 +9,14 @@ use futures_util::StreamExt;
 use gtk4::{glib, ApplicationWindow, Button};
 use serde_json::json;
 
+use crate::kwin_tracker::WindowEvent;
 use crate::remote_input::RemoteInput;
 use crate::server::EventBus;
 use crate::toggle_click_through;
 
 const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
 const PRICE_CHECK_ID: &str = "price-check";
+const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
 
 pub fn spawn(
     window: ApplicationWindow,
@@ -23,6 +25,7 @@ pub fn spawn(
     kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
+    active_window: Rc<RefCell<Option<WindowEvent>>>,
 ) {
     let price_check_open = Rc::new(Cell::new(false));
     glib::spawn_future_local(async move {
@@ -34,6 +37,7 @@ pub fn spawn(
             &remote_input,
             &events,
             &price_check_open,
+            &active_window,
         )
         .await
         {
@@ -50,6 +54,7 @@ async fn run(
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
+    active_window: &Rc<RefCell<Option<WindowEvent>>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy.create_session(CreateSessionOptions::default()).await?;
@@ -60,6 +65,8 @@ async fn run(
             .preferred_trigger(Some("SHIFT+space")),
         NewShortcut::new(PRICE_CHECK_ID, "Price-check hovered item")
             .preferred_trigger(Some("CTRL+d")),
+        NewShortcut::new(PRICE_CHECK_LOCKED_ID, "Price-check hovered item (locked open)")
+            .preferred_trigger(Some("CTRL+ALT+d")),
     ];
 
     let request = proxy
@@ -84,7 +91,26 @@ async fn run(
         match event.shortcut_id() {
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
             PRICE_CHECK_ID => {
-                price_check(kwin_connection, remote_input, events, price_check_open).await
+                price_check(
+                    kwin_connection,
+                    remote_input,
+                    events,
+                    price_check_open,
+                    active_window,
+                    false,
+                )
+                .await
+            }
+            PRICE_CHECK_LOCKED_ID => {
+                price_check(
+                    kwin_connection,
+                    remote_input,
+                    events,
+                    price_check_open,
+                    active_window,
+                    true,
+                )
+                .await
             }
             _ => {}
         }
@@ -98,6 +124,8 @@ async fn price_check(
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
+    active_window: &Rc<RefCell<Option<WindowEvent>>>,
+    locked: bool,
 ) {
     // Pressing the same hotkey again while the popup's open closes it --
     // hide-exclusive-widget targets exactly this widget (unlike
@@ -105,6 +133,19 @@ async fn price_check(
     if price_check_open.get() {
         events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
         price_check_open.set(false);
+        return;
+    }
+
+    // The global shortcut fires regardless of which window has focus; without
+    // this check, pressing it over any other app (browser, terminal, ...)
+    // would Ctrl+C-and-read whatever text is selected there. Only forward the
+    // hotkey to the game.
+    let is_poe = active_window
+        .borrow()
+        .as_ref()
+        .is_some_and(WindowEvent::is_path_of_exile);
+    if !is_poe {
+        println!("[shortcuts] price-check ignored: active window is not Path of Exile");
         return;
     }
 
@@ -156,24 +197,25 @@ async fn price_check(
     };
 
     // "price-check" is the target the renderer's PriceCheckWindow.vue
-    // actually listens for; focusOverlay: true skips its own
-    // hide-on-mouse-leave area-tracking path (OVERLAY->MAIN::track-area) —
-    // ported separately below instead of wiring that protocol, since the
-    // real WidgetAreaTracker.ts's "hover the popup to interact with it"
-    // path only activates while a modifier key (Ctrl) is held, which needs
-    // live keyboard-modifier state we don't have. The auto-close-on-distance
-    // half is what's actually replicated here.
+    // actually listens for. focusOverlay matches the real app's two default
+    // hotkeys (renderer/src/web/price-check/PriceCheckWindow.vue): plain
+    // Ctrl+D sends focusOverlay:false and auto-closes on mouse-move-away;
+    // Ctrl+Alt+D ("hotkeyLocked") sends focusOverlay:true, which skips that
+    // (real APT's own hover-to-interact replacement for the auto-close
+    // path — ours is a simpler Rust-side poll, see spawn_auto_close).
     events.send_last_active(
         "MAIN->CLIENT::item-text",
         json!({
             "target": "price-check",
             "clipboard": clipboard,
             "position": { "x": x, "y": y },
-            "focusOverlay": true,
+            "focusOverlay": locked,
         }),
     );
     price_check_open.set(true);
-    spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
+    if !locked {
+        spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
+    }
 }
 
 /// Ported from main/src/windowing/WidgetAreaTracker.ts: closes the popup
