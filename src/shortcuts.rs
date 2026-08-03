@@ -89,8 +89,22 @@ async fn run(
         );
     }
 
+    // Debounce: the portal has been observed emitting multiple Activated
+    // signals for what looked like a single physical keypress (several
+    // rapid modifier transitions logged for one press during testing) —
+    // without this, that means duplicate Ctrl+C injections and duplicate
+    // proxy/network requests per press.
+    const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+    let mut last_activation: Option<std::time::Instant> = None;
+
     let mut activated = proxy.receive_activated().await?;
     while let Some(event) = activated.next().await {
+        let now = std::time::Instant::now();
+        if last_activation.is_some_and(|t| now.duration_since(t) < DEBOUNCE) {
+            continue;
+        }
+        last_activation = Some(now);
+
         match event.shortcut_id() {
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
             PRICE_CHECK_ID => {
