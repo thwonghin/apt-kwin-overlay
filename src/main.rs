@@ -117,6 +117,7 @@ fn build_ui(app: &Application) {
     let conn_rx = kwin_tracker::spawn(sender);
     {
         let active_window = active_window.clone();
+        let window = window.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -125,6 +126,13 @@ fn build_ui(app: &Application) {
                             "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
                             w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                         );
+                        // Layer-shell surfaces with no explicit monitor set
+                        // just go wherever the compositor's default output
+                        // is — which isn't necessarily where the game
+                        // actually is on a multi-monitor setup. Follow PoE.
+                        if w.is_path_of_exile() {
+                            move_overlay_to_window_monitor(&window, &w);
+                        }
                         active_window.replace(Some(w));
                     }
                     TrackerEvent::GeometryChanged(w) => println!(
@@ -249,4 +257,35 @@ pub(crate) fn set_click_through(
             "usingHotkey": true,
         }),
     );
+}
+
+/// A layer-shell surface with no explicit monitor set just lands on
+/// whatever output the compositor considers default — not necessarily
+/// where the game actually is on a multi-monitor setup. gtk4-layer-shell
+/// supports changing this on an already-mapped surface (it gets silently
+/// remapped), so this just re-targets it whenever PoE's window activates.
+fn move_overlay_to_window_monitor(window: &ApplicationWindow, target: &kwin_tracker::WindowEvent) {
+    let display = WidgetExt::display(window);
+    let center_x = target.x + target.width / 2.0;
+    let center_y = target.y + target.height / 2.0;
+
+    let monitors = display.monitors();
+    for i in 0..monitors.n_items() {
+        let Some(obj) = monitors.item(i) else { continue };
+        let Ok(monitor) = obj.downcast::<gtk4::gdk::Monitor>() else { continue };
+        let geo = monitor.geometry();
+        let (mx, my, mw, mh) = (
+            geo.x() as f64,
+            geo.y() as f64,
+            geo.width() as f64,
+            geo.height() as f64,
+        );
+        if center_x >= mx && center_x < mx + mw && center_y >= my && center_y < my + mh {
+            if window.monitor().as_ref() != Some(&monitor) {
+                println!("[main] moving overlay to PoE's monitor");
+                window.set_monitor(Some(&monitor));
+            }
+            return;
+        }
+    }
 }
