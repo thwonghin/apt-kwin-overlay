@@ -6,6 +6,7 @@ mod remote_input;
 mod server;
 mod shortcuts;
 mod uploads;
+mod xdg;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,7 +19,7 @@ use kwin_tracker::TrackerEvent;
 use webkit6::prelude::*;
 use webkit6::WebView;
 
-pub(crate) const APP_ID: &str = "dev.spike.apt_kwin_overlay";
+pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
 
 fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
@@ -29,7 +30,7 @@ fn main() -> glib::ExitCode {
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("apt-kwin-overlay spike")
+        .title("apt-kwin-overlay")
         .build();
 
     window.init_layer_shell();
@@ -54,7 +55,21 @@ fn build_ui(app: &Application) {
     // (remote_input.rs), which works regardless of local focus.
     window.set_keyboard_mode(KeyboardMode::None);
 
-    let (port, backend) = server::spawn().expect("failed to start local server");
+    let (port, backend) = match server::spawn() {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("[main] failed to start local server: {err}");
+            let dialog = gtk4::AlertDialog::builder()
+                .message("apt-kwin-overlay failed to start")
+                .detail(format!("Could not start the local server: {err}"))
+                .build();
+            let app = app.clone();
+            dialog.choose(None::<&ApplicationWindow>, gtk4::gio::Cancellable::NONE, move |_| {
+                app.quit();
+            });
+            return;
+        }
+    };
     println!("[main] server listening on 127.0.0.1:{port}");
 
     let webview = WebView::new();
@@ -114,23 +129,27 @@ fn build_ui(app: &Application) {
             while let Ok(event) = receiver.recv().await {
                 match event {
                     TrackerEvent::Activated(w) => {
-                        println!(
-                            "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
-                            w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
-                        );
                         // Layer-shell surfaces with no explicit monitor set
                         // just go wherever the compositor's default output
                         // is — which isn't necessarily where the game
                         // actually is on a multi-monitor setup. Follow PoE.
                         if w.is_path_of_exile() {
+                            println!(
+                                "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
+                                w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
+                            );
                             move_overlay_to_window_monitor(&window, &w, &click_through_for_monitor);
                         }
                         active_window.replace(Some(w));
                     }
-                    TrackerEvent::GeometryChanged(w) => println!(
-                        "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
-                        w.class_name, w.caption, w.width, w.height, w.x, w.y
-                    ),
+                    TrackerEvent::GeometryChanged(w) => {
+                        if w.is_path_of_exile() {
+                            println!(
+                                "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
+                                w.class_name, w.caption, w.width, w.height, w.x, w.y
+                            );
+                        }
+                    }
                 }
             }
         });

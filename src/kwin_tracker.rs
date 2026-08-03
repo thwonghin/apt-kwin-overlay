@@ -4,9 +4,9 @@ use serde::Deserialize;
 use zbus::interface;
 
 const PLUGIN_NAME: &str = "apt-kwin-overlay-tracker";
-const CALLBACK_IFACE: &str = "dev.spike.apt_kwin_overlay.Callback";
+const CALLBACK_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.Callback";
 const CALLBACK_PATH: &str = "/";
-const CURSOR_QUERY_IFACE: &str = "dev.spike.apt_kwin_overlay.CursorPosCallback";
+const CURSOR_QUERY_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowEvent {
@@ -48,7 +48,7 @@ struct Callback {
     sender: async_channel::Sender<TrackerEvent>,
 }
 
-#[interface(name = "dev.spike.apt_kwin_overlay.Callback")]
+#[interface(name = "io.github.thwonghin.AptKwinOverlay.Callback")]
 impl Callback {
     async fn activated(&self, json: String) {
         match serde_json::from_str::<WindowEvent>(&json) {
@@ -183,7 +183,7 @@ struct CursorPosCallback {
     sender: async_channel::Sender<(f64, f64)>,
 }
 
-#[interface(name = "dev.spike.apt_kwin_overlay.CursorPosCallback")]
+#[interface(name = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback")]
 impl CursorPosCallback {
     async fn cursor_pos(&self, json: String) {
         match serde_json::from_str::<CursorPos>(&json) {

@@ -261,17 +261,16 @@ validated PR for upstream awakened-poe-trade commits), `release.yml`
 (tag push → build → GitHub Release with a tarball); `server.rs`'s renderer
 asset path now resolves at runtime (`APT_KWIN_OVERLAY_DIST` env var →
 `/usr/share/apt-kwin-overlay/dist` → dev fallback via `.cargo/config.toml`)
-instead of baking in a build-time path that broke once packaged.
+instead of baking in a build-time path that broke once packaged; crash
+resilience (`server::spawn()` failure in `main.rs` now shows a
+`gtk4::AlertDialog` and quits cleanly instead of panicking); XDG basedir
+compliance (`xdg::data_dir()` respects `$XDG_DATA_HOME`, used by
+`config_store.rs`, `uploads.rs`, `remote_input.rs`); branding
+(`APP_ID` is `io.github.thwonghin.AptKwinOverlay`, window title is
+"apt-kwin-overlay"); `.desktop` file (`data/io.github.thwonghin.AptKwinOverlay.desktop`,
+installed to `/usr/share/applications` by `PKGBUILD`'s `package()`, reuses
+the real APT icon already vendored at `renderer/dist/icon.png`) — needed
+for `ashpd::register_host_app` to succeed on KDE, which looks up an
+installed app matching `APP_ID` via the portal's Registry interface.
 
-**Remaining**:
-
-1. Crash resilience — `main.rs:57`: `server::spawn().expect(...)` panics
-   the whole app with no user-facing message if the local port's already
-   bound (e.g. a second instance launched by accident). Real reliability
-   gap, worth doing first of these three.
-2. XDG basedir non-compliance — `config_store.rs`, `uploads.rs`,
-   `remote_input.rs` all read `$HOME` directly (`.expect("HOME must be
-   set")`) instead of `XDG_CONFIG_HOME`/`XDG_DATA_HOME`. Cosmetic today.
-3. Branding never left prototype stage — `APP_ID` is
-   `dev.spike.apt_kwin_overlay`, window title says "apt-kwin-overlay
-   spike". Cosmetic, worth fixing before wider use.
+**Remaining**: nothing — all non-feature gaps closed as of 2026-08-03.

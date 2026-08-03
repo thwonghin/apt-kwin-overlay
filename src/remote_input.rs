@@ -23,9 +23,7 @@ const KEY_LEFTCTRL: u32 = 29;
 const KEY_C: u32 = 46;
 
 fn restore_token_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set");
-    std::path::PathBuf::from(home)
-        .join(".local/share/apt-kwin-overlay/remote_desktop_restore_token")
+    crate::xdg::data_dir().join("apt-kwin-overlay/remote_desktop_restore_token")
 }
 
 struct KeyboardHandle {

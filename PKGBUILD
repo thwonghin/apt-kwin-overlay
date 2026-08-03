@@ -24,7 +24,16 @@ prepare() {
 build() {
   cd "$pkgname"
   ./scripts/build-renderer.sh
-  cargo build --release --locked
+  # -flto=auto in CFLAGS/CXXFLAGS makes GCC compile the `ring` crate's C code
+  # (via its build script) into "fat" LTO objects. GCC's collect2 then
+  # auto-detects the LTO bytecode sections in that static archive and enters
+  # LTO mode for the final link regardless of LDFLAGS — which breaks badly
+  # when mixed with Rust's LLVM-based objects under ld.lld, silently dropping
+  # ring_core symbols and producing "undefined symbol" errors. Verified by
+  # bisecting the flag set directly: stripping -flto=auto here is sufficient
+  # and necessary; every other hardening flag can stay.
+  CFLAGS="${CFLAGS/-flto=auto/}" CXXFLAGS="${CXXFLAGS/-flto=auto/}" \
+    cargo build --release --locked
 }
 
 package() {
@@ -33,4 +42,6 @@ package() {
   install -d "$pkgdir/usr/share/apt-kwin-overlay"
   cp -r vendor/awakened-poe-trade/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/dist"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 data/io.github.thwonghin.AptKwinOverlay.desktop \
+    "$pkgdir/usr/share/applications/io.github.thwonghin.AptKwinOverlay.desktop"
 }
