@@ -66,6 +66,14 @@ fn build_ui(app: &Application) {
     if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
         let ua = settings.user_agent().map(|s| s.to_string()).unwrap_or_default();
         settings.set_user_agent(Some(&format!("{ua} Electron/32.0.0")));
+
+        // Confirmed via testing: this is WebKit's own default already (not
+        // the bottleneck behind observed UI lag, which traced instead to
+        // kwin_tracker.rs hammering KWin's scripting D-Bus interface — see
+        // shortcuts.rs's spawn_auto_close). Set explicitly anyway so this
+        // doesn't silently regress if a future WebKitGTK version changes
+        // its default.
+        settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     }
     webview.load_uri(&format!("http://127.0.0.1:{port}/"));
 
