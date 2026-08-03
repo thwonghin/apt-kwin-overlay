@@ -140,14 +140,27 @@ async fn run(
                 )
                 .await
             }
-            ESCAPE_ID => escape_all(
-                window,
-                toggle,
-                click_through,
-                events,
-                price_check_open,
-                price_check_locked,
-            ),
+            ESCAPE_ID => {
+                if click_through.get() {
+                    // Nothing of ours is showing, so there's nothing to
+                    // close — but the portal grab still ate the keypress at
+                    // the OS level regardless (can't bind a global shortcut
+                    // conditionally), so forward it back in rather than
+                    // silently swallowing the game's own Escape handling.
+                    if let Some(remote) = remote_input.borrow().as_ref() {
+                        remote.press_escape();
+                    }
+                } else {
+                    escape_all(
+                        window,
+                        toggle,
+                        click_through,
+                        events,
+                        price_check_open,
+                        price_check_locked,
+                    );
+                }
+            }
             _ => {}
         }
     }
