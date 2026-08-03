@@ -21,7 +21,7 @@ const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
 pub fn spawn(
     window: ApplicationWindow,
     click_through: Rc<Cell<bool>>,
-    kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
+    cursor_pos: Rc<Cell<(f64, f64)>>,
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
     active_window: Rc<RefCell<Option<WindowEvent>>>,
@@ -51,7 +51,7 @@ pub fn spawn(
         if let Err(err) = run(
             &window,
             &click_through,
-            &kwin_connection,
+            &cursor_pos,
             &remote_input,
             &events,
             &price_check_open,
@@ -86,7 +86,7 @@ fn close_all_ui(
 async fn run(
     window: &ApplicationWindow,
     click_through: &Rc<Cell<bool>>,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
+    cursor_pos: &Rc<Cell<(f64, f64)>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
@@ -145,7 +145,7 @@ async fn run(
                 price_check(
                     window,
                     click_through,
-                    kwin_connection,
+                    cursor_pos,
                     remote_input,
                     events,
                     price_check_open,
@@ -159,7 +159,7 @@ async fn run(
                 price_check(
                     window,
                     click_through,
-                    kwin_connection,
+                    cursor_pos,
                     remote_input,
                     events,
                     price_check_open,
@@ -179,7 +179,7 @@ async fn run(
 async fn price_check(
     window: &ApplicationWindow,
     click_through: &Rc<Cell<bool>>,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
+    cursor_pos: &Rc<Cell<(f64, f64)>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
@@ -220,23 +220,7 @@ async fn price_check(
         return;
     }
 
-    let cursor = {
-        let connection = kwin_connection.borrow().clone();
-        match connection {
-            Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
-                Ok(pos) => Some(pos),
-                Err(err) => {
-                    eprintln!("[shortcuts] price-check cursor query failed: {err}");
-                    None
-                }
-            },
-            None => {
-                eprintln!("[shortcuts] price-check: kwin connection not ready yet");
-                None
-            }
-        }
-    };
-    let (x, y) = cursor.unwrap_or((0.0, 0.0));
+    let (x, y) = cursor_pos.get();
 
     let remote_ref = remote_input.borrow();
     let Some(remote) = remote_ref.as_ref() else {
@@ -294,19 +278,23 @@ async fn price_check(
         set_click_through(false, window, click_through, events);
         price_check_locked.set(true);
     } else {
-        spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
+        spawn_auto_close(x, y, cursor_pos.clone(), events.clone(), price_check_open.clone());
     }
 }
 
 /// Ported from main/src/windowing/WidgetAreaTracker.ts: closes the popup
 /// once the cursor has moved far enough from where the item was originally
-/// hovered. Polls via the same one-shot KWin cursor query used to capture
-/// `from` in the first place, rather than the real implementation's
-/// continuous uiohook mousemove stream (which we don't have on Wayland).
+/// hovered. `cursor_pos` is updated continuously by kwin_tracker.rs's
+/// persistent script (workspace.cursorPosChanged) — this just reads it, no
+/// D-Bus round trip per tick. An earlier version called a one-shot KWin
+/// cursor query every tick instead, which meant loading/running/unloading a
+/// disposable KWin script 25x/sec while a popup was open — cheap-looking in
+/// isolation, but enough sustained D-Bus + file I/O traffic to make the
+/// whole compositor feel laggy, not just this popup.
 fn spawn_auto_close(
     from_x: f64,
     from_y: f64,
-    kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
+    cursor_pos: Rc<Cell<(f64, f64)>>,
     events: Arc<EventBus>,
     price_check_open: Rc<Cell<bool>>,
 ) {
@@ -325,12 +313,7 @@ fn spawn_auto_close(
                 return; // closed some other way (e.g. pressing the hotkey again)
             }
 
-            let connection = kwin_connection.borrow().clone();
-            let Some(connection) = connection else { continue };
-            let Ok((x, y)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
-                continue;
-            };
-
+            let (x, y) = cursor_pos.get();
             let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
             if distance > CLOSE_THRESHOLD {
                 events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);

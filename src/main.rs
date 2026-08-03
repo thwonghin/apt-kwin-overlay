@@ -96,12 +96,19 @@ fn build_ui(app: &Application) {
     }
 
     let active_window: Rc<RefCell<Option<kwin_tracker::WindowEvent>>> = Rc::new(RefCell::new(None));
+    // Updated continuously via workspace.cursorPosChanged (kwin_tracker.rs's
+    // persistent script) instead of queried on demand — an earlier on-demand
+    // approach loaded/ran/unloaded a disposable KWin script per query, which
+    // was fine for a single price-check press but caused real compositor lag
+    // once the price-check auto-close loop started polling it every 40ms.
+    let cursor_pos: Rc<Cell<(f64, f64)>> = Rc::new(Cell::new((0.0, 0.0)));
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
-    let conn_rx = kwin_tracker::spawn(sender);
+    kwin_tracker::spawn(sender);
     {
         let active_window = active_window.clone();
         let window = window.clone();
         let click_through_for_monitor = click_through.clone();
+        let cursor_pos = cursor_pos.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -123,17 +130,8 @@ fn build_ui(app: &Application) {
                         "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
                         w.class_name, w.caption, w.width, w.height, w.x, w.y
                     ),
+                    TrackerEvent::CursorMoved(x, y) => cursor_pos.set((x, y)),
                 }
-            }
-        });
-    }
-
-    let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
-    {
-        let kwin_connection = kwin_connection.clone();
-        glib::spawn_future_local(async move {
-            if let Ok(connection) = conn_rx.recv().await {
-                kwin_connection.replace(Some(connection));
             }
         });
     }
@@ -142,7 +140,7 @@ fn build_ui(app: &Application) {
     {
         let window = window.clone();
         let click_through = click_through.clone();
-        let kwin_connection = kwin_connection.clone();
+        let cursor_pos = cursor_pos.clone();
         let remote_input = remote_input.clone();
         let events = backend.events.clone();
         let active_window = active_window.clone();
@@ -169,7 +167,7 @@ fn build_ui(app: &Application) {
             shortcuts::spawn(
                 window,
                 click_through,
-                kwin_connection,
+                cursor_pos,
                 remote_input,
                 events,
                 active_window,
