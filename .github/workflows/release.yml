@@ -1,0 +1,71 @@
+name: Release
+
+# Tag pushes require write access to this repo, so there's no fork-PR
+# exposure to worry about here (unlike ci.yml) regardless of trigger.
+# workflow_dispatch lets you test the packaging steps without cutting a
+# real tag first -- see the "Create GitHub Release" step below, which only
+# runs for an actual tag push.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Cache npm dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+
+      - name: Build renderer
+        run: ./scripts/build-renderer.sh
+
+      - name: Build backend
+        run: cargo build --release --locked
+
+      - name: Package release tarball
+        id: package
+        # Layout mirrors what the PKGBUILD installs (bin/ + share/), just
+        # bundled as a tarball for anyone who'd rather skip building the
+        # Rust/GTK toolchain themselves. Still needs gtk4/gtk4-layer-shell/
+        # webkitgtk-6.0 installed at runtime -- this isn't a static bundle.
+        run: |
+          stage="apt-kwin-overlay-${GITHUB_REF_NAME}"
+          mkdir -p "$stage/bin" "$stage/share/apt-kwin-overlay"
+          cp target/release/apt-kwin-overlay "$stage/bin/"
+          cp -r vendor/awakened-poe-trade/renderer/dist "$stage/share/apt-kwin-overlay/dist"
+          cp LICENSE README.md "$stage/"
+          tar czf "$stage.tar.gz" "$stage"
+          echo "archive=$stage.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.archive }}
+          path: ${{ steps.package.outputs.archive }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: ${{ steps.package.outputs.archive }}
