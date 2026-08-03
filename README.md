@@ -80,6 +80,17 @@ git submodule update --init
 cargo build --release
 ```
 
+### Installing on Arch/CachyOS via the included PKGBUILD
+
+```sh
+git clone https://github.com/thwonghin/apt-kwin-overlay.git
+cd apt-kwin-overlay
+makepkg -si
+```
+
+Installs the `apt-kwin-overlay` binary to `/usr/bin` and its renderer
+assets to `/usr/share/apt-kwin-overlay/dist`.
+
 ## Running
 
 ```sh
