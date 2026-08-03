@@ -10,9 +10,9 @@ mod uploads;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gtk4::cairo::{RectangleInt, Region};
+use gtk4::cairo::Region;
 use gtk4::prelude::*;
-use gtk4::{glib, Application, ApplicationWindow, Button, Overlay};
+use gtk4::{glib, Application, ApplicationWindow};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kwin_tracker::TrackerEvent;
 use webkit6::prelude::*;
@@ -62,41 +62,16 @@ fn build_ui(app: &Application) {
     }
     webview.load_uri(&format!("http://127.0.0.1:{port}/"));
 
-    let toggle = Button::with_label("click-through: OFF");
-    toggle.set_halign(gtk4::Align::End);
-    toggle.set_valign(gtk4::Align::Start);
-    toggle.set_margin_top(12);
-    toggle.set_margin_end(12);
-
-    // Starts true (not false-then-flipped): other logic (e.g. shortcuts.rs's
-    // escape-grab demand check) reads this Cell from the moment the app
-    // starts, before the deferred idle callback below has had a chance to
-    // run — if it started false, that logic would briefly believe our UI
-    // was open (click-through "off") and race to grab shortcuts it doesn't
-    // need yet.
+    // Starts true (not false-then-flipped): other logic reads this Cell
+    // from the moment the app starts, before the deferred idle callback
+    // below has had a chance to run.
     let click_through = Rc::new(Cell::new(true));
-    let window_for_toggle = window.clone();
-    let toggle_for_click = toggle.clone();
-    let click_through_for_click = click_through.clone();
-    let events_for_click = backend.events.clone();
-    toggle.connect_clicked(move |_btn| {
-        toggle_click_through(
-            &window_for_toggle,
-            &toggle_for_click,
-            &click_through_for_click,
-            &events_for_click,
-        );
-    });
 
-    let overlay = Overlay::new();
-    overlay.set_child(Some(&webview));
-    overlay.add_overlay(&toggle);
-
-    window.set_child(Some(&overlay));
+    window.set_child(Some(&webview));
 
     // Transparent CSS background so the layer surface itself doesn't paint opaque.
     let css = gtk4::CssProvider::new();
-    css.load_from_string("window, overlay { background: transparent; }");
+    css.load_from_string("window { background: transparent; }");
     gtk4::style_context_add_provider_for_display(
         &WidgetExt::display(&window),
         &css,
@@ -105,16 +80,11 @@ fn build_ui(app: &Application) {
 
     window.present();
     // click_through's tracked state already defaults to true (see above);
-    // this just applies that to the actual surface once layout has
-    // happened. Deferred to idle: compute_bounds (used to carve out the
-    // toggle button's input-region exception) needs the button to have
-    // already been laid out, which hasn't happened yet immediately after
-    // present().
+    // this just applies that to the actual surface once layout has happened.
     {
         let window = window.clone();
-        let toggle = toggle.clone();
         glib::idle_add_local_once(move || {
-            apply_click_through_to_surface(true, &window, &toggle);
+            apply_click_through_to_surface(true, &window);
         });
     }
 
@@ -124,7 +94,6 @@ fn build_ui(app: &Application) {
     {
         let active_window = active_window.clone();
         let window = window.clone();
-        let toggle_for_monitor = toggle.clone();
         let click_through_for_monitor = click_through.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
@@ -139,12 +108,7 @@ fn build_ui(app: &Application) {
                         // is — which isn't necessarily where the game
                         // actually is on a multi-monitor setup. Follow PoE.
                         if w.is_path_of_exile() {
-                            move_overlay_to_window_monitor(
-                                &window,
-                                &w,
-                                &toggle_for_monitor,
-                                &click_through_for_monitor,
-                            );
+                            move_overlay_to_window_monitor(&window, &w, &click_through_for_monitor);
                         }
                         active_window.replace(Some(w));
                     }
@@ -170,7 +134,6 @@ fn build_ui(app: &Application) {
     let remote_input: Rc<RefCell<Option<remote_input::RemoteInput>>> = Rc::new(RefCell::new(None));
     {
         let window = window.clone();
-        let toggle = toggle.clone();
         let click_through = click_through.clone();
         let kwin_connection = kwin_connection.clone();
         let remote_input = remote_input.clone();
@@ -198,7 +161,6 @@ fn build_ui(app: &Application) {
 
             shortcuts::spawn(
                 window,
-                toggle,
                 click_through,
                 kwin_connection,
                 remote_input,
@@ -213,13 +175,8 @@ fn build_ui(app: &Application) {
 /// `can-target` only affects GTK's own internal hit-testing, not the input
 /// region the compositor is told about — that requires poking the surface
 /// directly, or clicks keep landing on our window no matter what.
-fn toggle_click_through(
-    window: &ApplicationWindow,
-    toggle: &Button,
-    click_through: &Rc<Cell<bool>>,
-    events: &server::EventBus,
-) {
-    set_click_through(!click_through.get(), window, toggle, click_through, events);
+fn toggle_click_through(window: &ApplicationWindow, click_through: &Rc<Cell<bool>>, events: &server::EventBus) {
+    set_click_through(!click_through.get(), window, click_through, events);
 }
 
 /// Like `toggle_click_through`, but sets an absolute state rather than
@@ -229,7 +186,6 @@ fn toggle_click_through(
 pub(crate) fn set_click_through(
     now_click_through: bool,
     window: &ApplicationWindow,
-    toggle: &Button,
     click_through: &Rc<Cell<bool>>,
     events: &server::EventBus,
 ) {
@@ -237,7 +193,7 @@ pub(crate) fn set_click_through(
         return;
     }
     click_through.set(now_click_through);
-    apply_click_through_to_surface(now_click_through, window, toggle);
+    apply_click_through_to_surface(now_click_through, window);
 
     // The renderer only auto-hides "hide-on-blur" popups (e.g. the
     // price-check window) in reaction to this event
@@ -260,25 +216,12 @@ pub(crate) fn set_click_through(
 /// to force a re-apply (the surface was remapped and may have silently
 /// dropped its input region) can do so without `set_click_through`'s
 /// early-return-if-state-unchanged guard getting in the way.
-fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationWindow, toggle: &Button) {
+fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationWindow) {
     let Some(surface) = window.surface() else { return };
     if now_click_through {
-        // Empty input region except for the toggle button itself, so it's
-        // still reachable to flip this back off.
-        let region = Region::create();
-        if let Some(bounds) = toggle.compute_bounds(window) {
-            let _ = region.union_rectangle(&RectangleInt::new(
-                bounds.x() as i32,
-                bounds.y() as i32,
-                bounds.width() as i32,
-                bounds.height() as i32,
-            ));
-        }
-        surface.set_input_region(Some(&region));
-        toggle.set_label("click-through: ON");
+        surface.set_input_region(Some(&Region::create()));
     } else {
         surface.set_input_region(None);
-        toggle.set_label("click-through: OFF");
     }
 }
 
@@ -296,7 +239,6 @@ fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationW
 fn move_overlay_to_window_monitor(
     window: &ApplicationWindow,
     target: &kwin_tracker::WindowEvent,
-    toggle: &Button,
     click_through: &Rc<Cell<bool>>,
 ) {
     let display = WidgetExt::display(window);
@@ -320,10 +262,9 @@ fn move_overlay_to_window_monitor(
                 window.set_monitor(Some(&monitor));
 
                 let window = window.clone();
-                let toggle = toggle.clone();
                 let click_through = click_through.clone();
                 glib::idle_add_local_once(move || {
-                    apply_click_through_to_surface(click_through.get(), &window, &toggle);
+                    apply_click_through_to_surface(click_through.get(), &window);
                 });
             }
             return;

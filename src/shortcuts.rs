@@ -6,7 +6,7 @@ use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, Ne
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::WindowIdentifier;
 use futures_util::StreamExt;
-use gtk4::{glib, ApplicationWindow, Button};
+use gtk4::{glib, ApplicationWindow};
 use serde_json::json;
 
 use crate::kwin_tracker::WindowEvent;
@@ -20,7 +20,6 @@ const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
 
 pub fn spawn(
     window: ApplicationWindow,
-    toggle: Button,
     click_through: Rc<Cell<bool>>,
     kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
@@ -33,7 +32,6 @@ pub fn spawn(
 
     {
         let window = window.clone();
-        let toggle = toggle.clone();
         let click_through = click_through.clone();
         let events = events.clone();
         let price_check_open = price_check_open.clone();
@@ -44,7 +42,7 @@ pub fn spawn(
             // assertGameActive handler for the same event) — it expects us to
             // actually restore click-through and close whatever's open.
             while focus_game_rx.recv().await.is_ok() {
-                close_all_ui(&window, &toggle, &click_through, &events, &price_check_open, &price_check_locked);
+                close_all_ui(&window, &click_through, &events, &price_check_open, &price_check_locked);
             }
         });
     }
@@ -52,7 +50,6 @@ pub fn spawn(
     glib::spawn_future_local(async move {
         if let Err(err) = run(
             &window,
-            &toggle,
             &click_through,
             &kwin_connection,
             &remote_input,
@@ -73,7 +70,6 @@ pub fn spawn(
 /// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
 fn close_all_ui(
     window: &ApplicationWindow,
-    toggle: &Button,
     click_through: &Rc<Cell<bool>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
@@ -84,12 +80,11 @@ fn close_all_ui(
         price_check_open.set(false);
     }
     price_check_locked.set(false);
-    set_click_through(true, window, toggle, click_through, events);
+    set_click_through(true, window, click_through, events);
 }
 
 async fn run(
     window: &ApplicationWindow,
-    toggle: &Button,
     click_through: &Rc<Cell<bool>>,
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
@@ -145,11 +140,10 @@ async fn run(
         last_activation = Some(now);
 
         match event.shortcut_id() {
-            TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
+            TOGGLE_OVERLAY_ID => toggle_click_through(window, click_through, events),
             PRICE_CHECK_ID => {
                 price_check(
                     window,
-                    toggle,
                     click_through,
                     kwin_connection,
                     remote_input,
@@ -164,7 +158,6 @@ async fn run(
             PRICE_CHECK_LOCKED_ID => {
                 price_check(
                     window,
-                    toggle,
                     click_through,
                     kwin_connection,
                     remote_input,
@@ -185,7 +178,6 @@ async fn run(
 
 async fn price_check(
     window: &ApplicationWindow,
-    toggle: &Button,
     click_through: &Rc<Cell<bool>>,
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
@@ -209,7 +201,7 @@ async fn price_check(
             // Opening the locked popup switched click-through off so it
             // could be interacted with; closing it should give control of
             // the game back rather than leaving the user stuck interactive.
-            set_click_through(true, window, toggle, click_through, events);
+            set_click_through(true, window, click_through, events);
             price_check_locked.set(false);
         }
         return;
@@ -299,7 +291,7 @@ async fn price_check(
     if locked {
         // The locked popup is meant to be interacted with (read, click,
         // copy) without the game stealing clicks underneath it.
-        set_click_through(false, window, toggle, click_through, events);
+        set_click_through(false, window, click_through, events);
         price_check_locked.set(true);
     } else {
         spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
