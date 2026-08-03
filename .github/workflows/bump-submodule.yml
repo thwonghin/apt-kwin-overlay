@@ -1,0 +1,76 @@
+name: Bump submodule
+
+# GitHub Actions has no way to subscribe to push events on a third-party
+# repo (that would require SnosMe/awakened-poe-trade to configure a
+# webhook pointing at us), so this polls on a schedule instead -- the same
+# approach Renovate/Dependabot use for tracking upstreams they don't own.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    # Cheap: a single network call, no container/build deps needed, so this
+    # can run daily for free regardless of whether anything changed.
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+
+      - name: Compare upstream HEAD to pinned commit
+        id: diff
+        run: |
+          upstream=$(git ls-remote https://github.com/SnosMe/awakened-poe-trade.git HEAD | cut -f1)
+          pinned=$(git rev-parse HEAD:vendor/awakened-poe-trade)
+          if [ "$upstream" != "$pinned" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  bump-and-build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Sy --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Bump submodule to upstream HEAD
+        run: git submodule update --remote vendor/awakened-poe-trade
+
+      # Validate the bumped commit actually builds before proposing it --
+      # deliberately duplicated from ci.yml rather than factored into a
+      # reusable workflow: workflow_call runs against a freshly-checked-out
+      # ref, which doesn't fit validating an in-progress, not-yet-pushed
+      # bump in this same job.
+      - name: Build renderer
+        run: ./scripts/build-renderer.sh
+
+      - name: Build backend
+        run: cargo build --release --locked
+
+      - name: Open PR
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: "chore: bump awakened-poe-trade submodule"
+          branch: bump-awakened-poe-trade
+          title: "Bump awakened-poe-trade submodule"
+          body: |
+            Automated submodule bump to upstream's current HEAD.
+            Renderer build and `cargo build --release --locked` both passed
+            in this workflow run before this PR was opened.

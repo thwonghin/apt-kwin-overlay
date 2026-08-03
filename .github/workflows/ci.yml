@@ -1,0 +1,49 @@
+name: CI
+
+# Plain `pull_request`, never `pull_request_target`: GitHub withholds repo
+# secrets and gives only a read-only GITHUB_TOKEN to `pull_request` runs
+# from forks, which is what makes running untrusted fork code (arbitrary
+# Cargo.toml/npm scripts) below safe. Do not swap this for
+# `pull_request_target` to work around first-run approval friction --
+# that swap is what actually exposes secrets to fork PRs.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Ubuntu's default runner can't build this: libgtk4-layer-shell-dev
+    # isn't packaged on Ubuntu until 26.04. Arch's `extra` repo has both
+    # gtk4-layer-shell and webkitgtk-6.0 as first-class packages.
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        # git must be installed before actions/checkout, since the
+        # container starts from a bare Arch image with no git.
+        run: |
+          pacman -Sy --noconfirm git nodejs npm rust gtk4-layer-shell webkitgtk-6.0 pkgconf base-devel namcap
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build renderer (vendored, unmodified Vue UI)
+        run: ./scripts/build-renderer.sh
+
+      - name: Build backend
+        run: cargo build --release --locked
+
+      - name: Validate PKGBUILD
+        # Full `makepkg` would re-fetch the source via its own git+ URL,
+        # which is redundant with the checkout above -- just confirm the
+        # PKGBUILD parses (a real syntax/authoring error would fail this)
+        # and run namcap for lint warnings.
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg --printsrcinfo" > /dev/null
+          namcap PKGBUILD || true
