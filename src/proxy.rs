@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::TcpStream;
 
-use crate::server::write_response;
+use crate::server::{write_response, write_response_with_headers};
 
 // Same allowlist as main/src/proxy.ts — this is how the renderer reaches
 // poe.ninja/trade-site data without a CORS-related dead end.
@@ -71,8 +71,28 @@ pub fn handle(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string();
+            // The renderer's own client-side RateLimiter (common.ts,
+            // adjustRateLimits) learns the real GGG-side limits from these
+            // response headers and paces itself accordingly. Without them
+            // it falls back to a tiny hardcoded default (1 request/5s) and
+            // never learns better — which made even two price checks a few
+            // seconds apart trip its own "Retry after N seconds" error,
+            // looking like a real rate-limit even though the actual
+            // request went through fine.
+            let rate_limit_headers: Vec<(String, String)> = response
+                .headers()
+                .iter()
+                .filter(|(name, _)| name.as_str().to_ascii_lowercase().starts_with("x-rate-limit"))
+                .filter_map(|(name, value)| {
+                    Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+                })
+                .collect();
+            let rate_limit_headers: Vec<(&str, &str)> = rate_limit_headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             let bytes = response.body_mut().read_to_vec().unwrap_or_default();
-            write_response(stream, status, &content_type, &bytes)
+            write_response_with_headers(stream, status, &content_type, &rate_limit_headers, &bytes)
         }
         Err(err) => {
             eprintln!("[proxy] request to {host} failed: {err}");

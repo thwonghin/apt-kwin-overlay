@@ -321,6 +321,16 @@ pub(crate) fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_response_with_headers(stream, status, content_type, &[], body)
+}
+
+pub(crate) fn write_response_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<()> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -336,6 +346,9 @@ pub(crate) fn write_response(
     );
     if !content_type.is_empty() {
         head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    for (key, value) in extra_headers {
+        head.push_str(&format!("{key}: {value}\r\n"));
     }
     head.push_str("Connection: close\r\n\r\n");
     stream.write_all(head.as_bytes())?;
