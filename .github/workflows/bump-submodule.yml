@@ -9,6 +9,12 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
+# Prevents an overlapping manual trigger from racing the scheduled run (or
+# a second manual trigger racing itself) on the same branch.
+concurrency:
+  group: bump-submodule-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write

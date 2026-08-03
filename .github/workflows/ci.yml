@@ -10,6 +10,12 @@ on:
   push:
   pull_request:
 
+# A new push/PR update cancels whatever's still running for that same
+# branch/PR, rather than piling up parallel runs of the same commit range.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
