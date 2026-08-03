@@ -319,10 +319,11 @@ fn spawn_auto_close(
     price_check_open: Rc<Cell<bool>>,
 ) {
     // The real default (2.5 * font size, ~50px) is paired with a
-    // hold-Ctrl-to-pin escape hatch we don't have; more generous here so
-    // small mouse drift while reading doesn't close it prematurely.
-    const CLOSE_THRESHOLD: f64 = 150.0;
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+    // hold-Ctrl-to-pin escape hatch we don't have; a bit more generous here
+    // so small mouse drift while reading doesn't close it prematurely, but
+    // not so generous it feels laggy to dismiss.
+    const CLOSE_THRESHOLD: f64 = 80.0;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
 
     glib::spawn_future_local(async move {
         loop {
