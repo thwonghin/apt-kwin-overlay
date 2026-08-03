@@ -25,14 +25,16 @@ pub struct WindowEvent {
 }
 
 impl WindowEvent {
-    /// Steam/Proton and native Linux builds surface different resourceClass
-    /// values (e.g. "steam_app_238960" vs "PathOfExileSteam"), but the
-    /// window caption stays a human-readable "Path of Exile"/"Path of Exile
-    /// 2" either way — checking both catches either case.
+    /// Steam surfaces a numeric resourceClass (e.g. "steam_app_3083953976")
+    /// that tells us nothing on this setup, so the caption is the only
+    /// usable signal — but it must be an exact match, not "contains": a
+    /// browser tab titled "Empower Support - Trade - Path of Exile -
+    /// Helium" contains the substring too, and matching loosely made the
+    /// overlay follow the browser around instead of the game.
     pub fn is_path_of_exile(&self) -> bool {
         let class = self.class_name.to_ascii_lowercase();
-        let caption = self.caption.to_ascii_lowercase();
-        class.contains("pathofexile") || caption.contains("path of exile")
+        let caption = self.caption.trim().to_ascii_lowercase();
+        class.contains("pathofexile") || caption == "path of exile" || caption == "path of exile 2"
     }
 }
 

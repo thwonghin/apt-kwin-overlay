@@ -118,6 +118,8 @@ fn build_ui(app: &Application) {
     {
         let active_window = active_window.clone();
         let window = window.clone();
+        let toggle_for_monitor = toggle.clone();
+        let click_through_for_monitor = click_through.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -131,7 +133,12 @@ fn build_ui(app: &Application) {
                         // is — which isn't necessarily where the game
                         // actually is on a multi-monitor setup. Follow PoE.
                         if w.is_path_of_exile() {
-                            move_overlay_to_window_monitor(&window, &w);
+                            move_overlay_to_window_monitor(
+                                &window,
+                                &w,
+                                &toggle_for_monitor,
+                                &click_through_for_monitor,
+                            );
                         }
                         active_window.replace(Some(w));
                     }
@@ -218,12 +225,35 @@ pub(crate) fn set_click_through(
     click_through: &Rc<Cell<bool>>,
     events: &server::EventBus,
 ) {
-    let Some(surface) = window.surface() else { return };
     if click_through.get() == now_click_through {
         return;
     }
     click_through.set(now_click_through);
+    apply_click_through_to_surface(now_click_through, window, toggle);
 
+    // The renderer only auto-hides "hide-on-blur" popups (e.g. the
+    // price-check window) in reaction to this event
+    // (renderer/src/web/overlay/OverlayWindow.vue) — without it, anything
+    // shown via item-text just stays on screen forever. click-through ON
+    // maps to "overlay not active" (game usable, so any lingering popup
+    // should go away); click-through OFF maps to "overlay active".
+    events.broadcast(
+        "MAIN->OVERLAY::focus-change",
+        serde_json::json!({
+            "game": now_click_through,
+            "overlay": !now_click_through,
+            "usingHotkey": true,
+        }),
+    );
+}
+
+/// Applies `now_click_through` to the surface's actual Wayland input region,
+/// unconditionally — split out of `set_click_through` so callers that need
+/// to force a re-apply (the surface was remapped and may have silently
+/// dropped its input region) can do so without `set_click_through`'s
+/// early-return-if-state-unchanged guard getting in the way.
+fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationWindow, toggle: &Button) {
+    let Some(surface) = window.surface() else { return };
     if now_click_through {
         // Empty input region except for the toggle button itself, so it's
         // still reachable to flip this back off.
@@ -242,29 +272,25 @@ pub(crate) fn set_click_through(
         surface.set_input_region(None);
         toggle.set_label("click-through: OFF");
     }
-
-    // The renderer only auto-hides "hide-on-blur" popups (e.g. the
-    // price-check window) in reaction to this event
-    // (renderer/src/web/overlay/OverlayWindow.vue) — without it, anything
-    // shown via item-text just stays on screen forever. click-through ON
-    // maps to "overlay not active" (game usable, so any lingering popup
-    // should go away); click-through OFF maps to "overlay active".
-    events.broadcast(
-        "MAIN->OVERLAY::focus-change",
-        serde_json::json!({
-            "game": now_click_through,
-            "overlay": !now_click_through,
-            "usingHotkey": true,
-        }),
-    );
 }
 
 /// A layer-shell surface with no explicit monitor set just lands on
 /// whatever output the compositor considers default — not necessarily
 /// where the game actually is on a multi-monitor setup. gtk4-layer-shell
-/// supports changing this on an already-mapped surface (it gets silently
-/// remapped), so this just re-targets it whenever PoE's window activates.
-fn move_overlay_to_window_monitor(window: &ApplicationWindow, target: &kwin_tracker::WindowEvent) {
+/// supports changing this on an already-mapped surface, but its own docs
+/// warn it "gets remapped so the change can take effect" — that remap was
+/// silently resetting the Wayland input region set for click-through,
+/// leaving the overlay fully click-blocking after every monitor switch even
+/// though our tracked state still said click-through was on. Re-applying
+/// the input region right after fixes it; deferred to idle so the remap
+/// (which isn't necessarily synchronous with `set_monitor()` returning) has
+/// actually landed first.
+fn move_overlay_to_window_monitor(
+    window: &ApplicationWindow,
+    target: &kwin_tracker::WindowEvent,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
+) {
     let display = WidgetExt::display(window);
     let center_x = target.x + target.width / 2.0;
     let center_y = target.y + target.height / 2.0;
@@ -284,6 +310,13 @@ fn move_overlay_to_window_monitor(window: &ApplicationWindow, target: &kwin_trac
             if window.monitor().as_ref() != Some(&monitor) {
                 println!("[main] moving overlay to PoE's monitor");
                 window.set_monitor(Some(&monitor));
+
+                let window = window.clone();
+                let toggle = toggle.clone();
+                let click_through = click_through.clone();
+                glib::idle_add_local_once(move || {
+                    apply_click_through_to_surface(click_through.get(), &window, &toggle);
+                });
             }
             return;
         }
