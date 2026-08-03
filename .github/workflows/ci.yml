@@ -40,6 +40,16 @@ jobs:
         with:
           submodules: recursive
 
+      # Caches ~/.cargo + target/, keyed on Cargo.lock + rustc version --
+      # cargo/npm dependency compilation is most of this job's runtime.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+
       - name: Build renderer (vendored, unmodified Vue UI)
         run: ./scripts/build-renderer.sh
 

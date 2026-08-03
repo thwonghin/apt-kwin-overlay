@@ -61,6 +61,16 @@ jobs:
       - name: Bump submodule to upstream HEAD
         run: git submodule update --remote vendor/awakened-poe-trade
 
+      # After the bump, so the npm cache key reflects the lockfile the
+      # bumped submodule actually ships, not the one we just replaced.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Cache npm dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+
       # Validate the bumped commit actually builds before proposing it --
       # deliberately duplicated from ci.yml rather than factored into a
       # reusable workflow: workflow_call runs against a freshly-checked-out
