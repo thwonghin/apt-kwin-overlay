@@ -279,6 +279,10 @@ async fn price_check(
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
     locked: bool,
 ) {
+    println!(
+        "[shortcuts] price_check called, locked={locked}, price_check_open={}",
+        price_check_open.get()
+    );
     // Pressing the same hotkey again while the popup's open closes it --
     // hide-exclusive-widget targets exactly this widget (unlike
     // focus-change, which affects every hide-on-blur/hide-on-focus widget).
@@ -354,6 +358,10 @@ async fn price_check(
             return;
         }
     };
+    println!(
+        "[shortcuts] price-check clipboard read ({} chars), sending item-text at ({x}, {y})",
+        clipboard.len()
+    );
 
     // "price-check" is the target the renderer's PriceCheckWindow.vue
     // actually listens for. focusOverlay matches the real app's two default

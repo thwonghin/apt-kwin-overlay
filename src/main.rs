@@ -68,7 +68,13 @@ fn build_ui(app: &Application) {
     toggle.set_margin_top(12);
     toggle.set_margin_end(12);
 
-    let click_through = Rc::new(Cell::new(false));
+    // Starts true (not false-then-flipped): other logic (e.g. shortcuts.rs's
+    // escape-grab demand check) reads this Cell from the moment the app
+    // starts, before the deferred idle callback below has had a chance to
+    // run — if it started false, that logic would briefly believe our UI
+    // was open (click-through "off") and race to grab shortcuts it doesn't
+    // need yet.
+    let click_through = Rc::new(Cell::new(true));
     let window_for_toggle = window.clone();
     let toggle_for_click = toggle.clone();
     let click_through_for_click = click_through.clone();
@@ -98,17 +104,17 @@ fn build_ui(app: &Application) {
     );
 
     window.present();
-    // Default to click-through ON (game usable underneath immediately).
-    // Deferred to idle: compute_bounds (used to carve out the toggle
-    // button's input-region exception) needs the button to have already
-    // been laid out, which hasn't happened yet immediately after present().
+    // click_through's tracked state already defaults to true (see above);
+    // this just applies that to the actual surface once layout has
+    // happened. Deferred to idle: compute_bounds (used to carve out the
+    // toggle button's input-region exception) needs the button to have
+    // already been laid out, which hasn't happened yet immediately after
+    // present().
     {
         let window = window.clone();
         let toggle = toggle.clone();
-        let click_through = click_through.clone();
-        let events = backend.events.clone();
         glib::idle_add_local_once(move || {
-            toggle_click_through(&window, &toggle, &click_through, &events);
+            apply_click_through_to_surface(true, &window, &toggle);
         });
     }
 
