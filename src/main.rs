@@ -39,12 +39,19 @@ fn build_ui(app: &Application) {
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(-1);
+    // Starting mode: never steal focus from the game while click-through is
+    // on. apply_click_through_to_surface flips this to OnDemand whenever
+    // click-through goes off, so clicking into a text field in our own UI
+    // (e.g. typing in settings) actually reaches it instead of the game —
+    // without that, mouse clicks land correctly (input region opens up) but
+    // every keypress still goes to whatever holds keyboard focus, which was
+    // always the game since this was never changed after startup.
+    //
     // Confirmed via testing: a layer-shell surface that never holds keyboard
     // focus also can't reliably read gdk::Clipboard (Wayland gates clipboard
-    // visibility by focus for privacy). Since the overlay is meant to never
-    // steal focus from the game, clipboard reads for the price-check flow go
-    // through the portal's Clipboard interface instead (remote_input.rs),
-    // which works regardless of local focus — so this can stay None.
+    // visibility by focus for privacy) — irrelevant here since price-check
+    // clipboard reads go through the portal's Clipboard interface instead
+    // (remote_input.rs), which works regardless of local focus.
     window.set_keyboard_mode(KeyboardMode::None);
 
     let (port, backend) = server::spawn().expect("failed to start local server");
@@ -217,6 +224,16 @@ pub(crate) fn set_click_through(
 /// dropped its input region) can do so without `set_click_through`'s
 /// early-return-if-state-unchanged guard getting in the way.
 fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationWindow) {
+    // OnDemand lets the compositor give this surface keyboard focus when
+    // something in it is clicked (e.g. a text field), without us stealing
+    // focus from the game while click-through is on and nothing of ours is
+    // meant to be interactive.
+    window.set_keyboard_mode(if now_click_through {
+        KeyboardMode::None
+    } else {
+        KeyboardMode::OnDemand
+    });
+
     let Some(surface) = window.surface() else { return };
     if now_click_through {
         surface.set_input_region(Some(&Region::create()));
