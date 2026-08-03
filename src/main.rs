@@ -92,6 +92,18 @@ fn build_ui(app: &Application) {
     );
 
     window.present();
+    // Default to click-through ON (game usable underneath immediately).
+    // Deferred to idle: compute_bounds (used to carve out the toggle
+    // button's input-region exception) needs the button to have already
+    // been laid out, which hasn't happened yet immediately after present().
+    {
+        let window = window.clone();
+        let toggle = toggle.clone();
+        let click_through = click_through.clone();
+        glib::idle_add_local_once(move || {
+            toggle_click_through(&window, &toggle, &click_through);
+        });
+    }
 
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
     let conn_rx = kwin_tracker::spawn(sender);
