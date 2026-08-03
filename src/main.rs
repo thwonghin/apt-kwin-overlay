@@ -180,8 +180,24 @@ fn toggle_click_through(
     click_through: &Rc<Cell<bool>>,
     events: &server::EventBus,
 ) {
+    set_click_through(!click_through.get(), window, toggle, click_through, events);
+}
+
+/// Like `toggle_click_through`, but sets an absolute state rather than
+/// flipping — needed by anything that decides the *desired* state itself
+/// (e.g. `widget_area_tracker`'s mouse-distance logic) rather than reacting
+/// to a keypress.
+pub(crate) fn set_click_through(
+    now_click_through: bool,
+    window: &ApplicationWindow,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
+    events: &server::EventBus,
+) {
     let Some(surface) = window.surface() else { return };
-    let now_click_through = !click_through.get();
+    if click_through.get() == now_click_through {
+        return;
+    }
     click_through.set(now_click_through);
 
     if now_click_through {

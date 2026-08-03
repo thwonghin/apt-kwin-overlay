@@ -156,9 +156,13 @@ async fn price_check(
     };
 
     // "price-check" is the target the renderer's PriceCheckWindow.vue
-    // actually listens for; focusOverlay: true skips its
-    // hide-on-mouse-leave area-tracking path (OVERLAY->MAIN::track-area),
-    // which isn't wired up yet.
+    // actually listens for; focusOverlay: true skips its own
+    // hide-on-mouse-leave area-tracking path (OVERLAY->MAIN::track-area) —
+    // ported separately below instead of wiring that protocol, since the
+    // real WidgetAreaTracker.ts's "hover the popup to interact with it"
+    // path only activates while a modifier key (Ctrl) is held, which needs
+    // live keyboard-modifier state we don't have. The auto-close-on-distance
+    // half is what's actually replicated here.
     events.send_last_active(
         "MAIN->CLIENT::item-text",
         json!({
@@ -169,4 +173,47 @@ async fn price_check(
         }),
     );
     price_check_open.set(true);
+    spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
+}
+
+/// Ported from main/src/windowing/WidgetAreaTracker.ts: closes the popup
+/// once the cursor has moved far enough from where the item was originally
+/// hovered. Polls via the same one-shot KWin cursor query used to capture
+/// `from` in the first place, rather than the real implementation's
+/// continuous uiohook mousemove stream (which we don't have on Wayland).
+fn spawn_auto_close(
+    from_x: f64,
+    from_y: f64,
+    kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
+    events: Arc<EventBus>,
+    price_check_open: Rc<Cell<bool>>,
+) {
+    // The real default (2.5 * font size, ~50px) is paired with a
+    // hold-Ctrl-to-pin escape hatch we don't have; more generous here so
+    // small mouse drift while reading doesn't close it prematurely.
+    const CLOSE_THRESHOLD: f64 = 150.0;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+    glib::spawn_future_local(async move {
+        loop {
+            glib::timeout_future(POLL_INTERVAL).await;
+
+            if !price_check_open.get() {
+                return; // closed some other way (e.g. pressing the hotkey again)
+            }
+
+            let connection = kwin_connection.borrow().clone();
+            let Some(connection) = connection else { continue };
+            let Ok((x, y)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
+                continue;
+            };
+
+            let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
+            if distance > CLOSE_THRESHOLD {
+                events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+                price_check_open.set(false);
+                return;
+            }
+        }
+    });
 }
