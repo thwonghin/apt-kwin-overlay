@@ -79,7 +79,7 @@ async fn run(
     let mut activated = proxy.receive_activated().await?;
     while let Some(event) = activated.next().await {
         match event.shortcut_id() {
-            TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through),
+            TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
             PRICE_CHECK_ID => price_check(kwin_connection, remote_input, events).await,
             _ => {}
         }

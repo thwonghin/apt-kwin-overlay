@@ -72,8 +72,14 @@ fn build_ui(app: &Application) {
     let window_for_toggle = window.clone();
     let toggle_for_click = toggle.clone();
     let click_through_for_click = click_through.clone();
+    let events_for_click = backend.events.clone();
     toggle.connect_clicked(move |_btn| {
-        toggle_click_through(&window_for_toggle, &toggle_for_click, &click_through_for_click);
+        toggle_click_through(
+            &window_for_toggle,
+            &toggle_for_click,
+            &click_through_for_click,
+            &events_for_click,
+        );
     });
 
     let overlay = Overlay::new();
@@ -100,8 +106,9 @@ fn build_ui(app: &Application) {
         let window = window.clone();
         let toggle = toggle.clone();
         let click_through = click_through.clone();
+        let events = backend.events.clone();
         glib::idle_add_local_once(move || {
-            toggle_click_through(&window, &toggle, &click_through);
+            toggle_click_through(&window, &toggle, &click_through, &events);
         });
     }
 
@@ -167,7 +174,12 @@ fn build_ui(app: &Application) {
 /// `can-target` only affects GTK's own internal hit-testing, not the input
 /// region the compositor is told about — that requires poking the surface
 /// directly, or clicks keep landing on our window no matter what.
-fn toggle_click_through(window: &ApplicationWindow, toggle: &Button, click_through: &Rc<Cell<bool>>) {
+fn toggle_click_through(
+    window: &ApplicationWindow,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
+    events: &server::EventBus,
+) {
     let Some(surface) = window.surface() else { return };
     let now_click_through = !click_through.get();
     click_through.set(now_click_through);
@@ -190,4 +202,19 @@ fn toggle_click_through(window: &ApplicationWindow, toggle: &Button, click_throu
         surface.set_input_region(None);
         toggle.set_label("click-through: OFF");
     }
+
+    // The renderer only auto-hides "hide-on-blur" popups (e.g. the
+    // price-check window) in reaction to this event
+    // (renderer/src/web/overlay/OverlayWindow.vue) — without it, anything
+    // shown via item-text just stays on screen forever. click-through ON
+    // maps to "overlay not active" (game usable, so any lingering popup
+    // should go away); click-through OFF maps to "overlay active".
+    events.broadcast(
+        "MAIN->OVERLAY::focus-change",
+        serde_json::json!({
+            "game": now_click_through,
+            "overlay": !now_click_through,
+            "usingHotkey": true,
+        }),
+    );
 }
