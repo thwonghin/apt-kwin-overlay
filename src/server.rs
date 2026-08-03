@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -11,8 +11,18 @@ use serde_json::{json, Value};
 use crate::config_store::ConfigStore;
 use crate::logger::Logger;
 
-const DIST_DIR: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/awakened-poe-trade/renderer/dist");
+// `cargo run` gets APT_KWIN_OVERLAY_DIST for free from .cargo/config.toml's
+// [env] table (set relative to the repo root); anything else needs it
+// exported explicitly, otherwise this falls back to where the PKGBUILD
+// installs it.
+fn dist_dir() -> &'static Path {
+    static DIST_DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIST_DIR.get_or_init(|| {
+        std::env::var("APT_KWIN_OVERLAY_DIST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/usr/share/apt-kwin-overlay/dist"))
+    })
+}
 
 type ClientId = u64;
 
@@ -327,7 +337,7 @@ fn handle_http(stream: TcpStream, config: &Arc<ConfigStore>) -> std::io::Result<
 
 fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
     let path = if path == "/" { "/index.html" } else { path };
-    let file_path: PathBuf = Path::new(DIST_DIR).join(path.trim_start_matches('/'));
+    let file_path: PathBuf = dist_dir().join(path.trim_start_matches('/'));
 
     match std::fs::read(&file_path) {
         Ok(bytes) => {
@@ -383,4 +393,18 @@ pub(crate) fn write_response_with_headers(
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dist_dir_falls_back_to_system_path_without_override() {
+        // .cargo/config.toml sets this for `cargo run`/`cargo test`; clear
+        // it to exercise the no-override path a packaged install hits.
+        // SAFETY: single-threaded test, no other thread reads env vars here.
+        unsafe { std::env::remove_var("APT_KWIN_OVERLAY_DIST") };
+        assert_eq!(dist_dir(), Path::new("/usr/share/apt-kwin-overlay/dist"));
+    }
 }

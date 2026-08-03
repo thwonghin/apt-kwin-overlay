@@ -1,0 +1,2 @@
+[env]
+APT_KWIN_OVERLAY_DIST = { value = "vendor/awakened-poe-trade/renderer/dist", relative = true }
