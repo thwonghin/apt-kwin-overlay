@@ -17,6 +17,7 @@ use crate::{set_click_through, toggle_click_through};
 const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
 const PRICE_CHECK_ID: &str = "price-check";
 const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
+const ESCAPE_ID: &str = "escape";
 
 pub fn spawn(
     window: ApplicationWindow,
@@ -70,6 +71,8 @@ async fn run(
             .preferred_trigger(Some("CTRL+d")),
         NewShortcut::new(PRICE_CHECK_LOCKED_ID, "Price-check hovered item (locked open)")
             .preferred_trigger(Some("CTRL+ALT+d")),
+        NewShortcut::new(ESCAPE_ID, "Close all overlay UI and return to the game")
+            .preferred_trigger(Some("Escape")),
     ];
 
     let request = proxy
@@ -137,11 +140,39 @@ async fn run(
                 )
                 .await
             }
+            ESCAPE_ID => escape_all(
+                window,
+                toggle,
+                click_through,
+                events,
+                price_check_open,
+                price_check_locked,
+            ),
             _ => {}
         }
     }
 
     Ok(())
+}
+
+/// Matches real APT's Escape handler (main/src/windowing/OverlayWindow.ts's
+/// `assertGameActive` on Escape/Ctrl+W) — force click-through back on and
+/// close any open overlay widgets, as an always-available safety hatch
+/// regardless of what's currently showing or which mode it's in.
+fn escape_all(
+    window: &ApplicationWindow,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
+    events: &Arc<EventBus>,
+    price_check_open: &Rc<Cell<bool>>,
+    price_check_locked: &Rc<Cell<bool>>,
+) {
+    if price_check_open.get() {
+        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        price_check_open.set(false);
+    }
+    price_check_locked.set(false);
+    set_click_through(true, window, toggle, click_through, events);
 }
 
 async fn price_check(
