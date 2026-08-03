@@ -1,0 +1,103 @@
+# apt-kwin-overlay
+
+A native KWin/Wayland backend for [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT).
+
+APT's overlay (hotkeys, click-through, global input injection, clipboard
+capture) is built entirely on Electron/X11 APIs and doesn't work under
+Wayland. This project throws away APT's Electron `main` process and
+replaces it with a small Rust/GTK4 host that does the same job using
+native Wayland/KDE mechanisms — while running APT's **real, unmodified**
+Vue renderer (vendored as a git submodule) on top of it, talking over the
+same WebSocket/HTTP protocol it always has.
+
+If you're on KDE Plasma (Wayland) and want APT's price-check overlay
+without falling back to X11/XWayland, this is what that looks like.
+
+## How it works
+
+```
+┌─────────────────────────────┐        ┌──────────────────────────────┐
+│  vendor/awakened-poe-trade   │  HTTP/  │        apt-kwin-overlay       │
+│  renderer (unmodified Vue UI) │◄──WS──►│  (this repo, Rust + GTK4)     │
+└─────────────────────────────┘        └──────────────────────────────┘
+                                          │
+                                          ├─ gtk4-layer-shell   fullscreen click-through overlay surface
+                                          ├─ WebKitGTK          renders the vendored renderer
+                                          ├─ xdg-desktop-portal global shortcuts, remote input (EIS),
+                                          │                     clipboard read
+                                          ├─ KWin scripting     window tracking (find/follow PoE),
+                                          │  (org.kde.KWin D-Bus)  cursor position queries
+                                          └─ local HTTP/WS server  serves the renderer's dist/ and
+                                                                   speaks its `MAIN<->OVERLAY`/`CLIENT`
+                                                                   protocol in place of Electron IPC
+```
+
+Everything under `src/` is a from-scratch reimplementation of one narrow
+slice of APT's `main/src/*` — just enough of the host contract for the real
+renderer to think it's still running inside Electron:
+
+| Module | Replaces (upstream `main/src/*`) | Does |
+|---|---|---|
+| `server.rs` | `server.ts`, IPC bus | Local HTTP server serving the renderer's `dist/`, plus the WebSocket event bus (`MAIN->OVERLAY`, `OVERLAY->MAIN`, etc.) the renderer expects instead of Electron IPC |
+| `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Global hotkeys via the `GlobalShortcuts` portal (toggle overlay, price-check, price-check-locked), popup auto-close |
+| `remote_input.rs` | `HostClipboard.ts`, synthetic key injection | Simulates Ctrl+C and reads clipboard via the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), since there's no other portal-sanctioned way to inject input or read the clipboard on Wayland |
+| `kwin_tracker.rs` | window-tracking bits of `OverlayWindow.ts` | Loads a small persistent KWin script over D-Bus to track window activation/geometry (find PoE, follow it across monitors) and do one-shot cursor-position queries |
+| `proxy.rs` | `proxy.ts` | Proxies renderer requests to poe.ninja / pathofexile.com (same host allowlist, UA override) |
+| `config_store.rs` | `ConfigStore.ts` | Persists the renderer's settings blob to disk, opaquely |
+| `uploads.rs` | upload handling | Screenshot/image upload storage, served back over HTTP |
+| `logger.rs` | `RemoteLogger.ts` | In-memory log buffer replayed to newly connected WS clients |
+
+The renderer itself lives in `vendor/awakened-poe-trade` as an unmodified
+git submodule — no patches, no fork. We only build its `renderer/` (the
+Vue app), never its `main/` (the Electron process this project replaces).
+
+## Status
+
+This is a working spike, not a polished release — see [WIP.md](WIP.md) for
+a detailed audit of what's implemented vs. what real APT does that we don't
+(yet) replicate: configurable hotkeys (ours are hardcoded), stash
+scroll-navigation, hover-to-interact, Alt-hold-to-peek, a tray icon, and more.
+
+## Requirements
+
+- KDE Plasma on Wayland (relies on KWin's scripting D-Bus interface and
+  `xdg-desktop-portal-kde` specifically — other compositors/portal
+  backends are untested and likely won't work as-is)
+- Rust (2024 edition toolchain)
+- `webkit2gtk-6.0` / `gtk4-layer-shell` system libraries (dev packages for
+  whichever your distro calls them)
+- Node.js + npm, only for the one-time renderer build
+
+## Building
+
+```sh
+git submodule update --init
+
+# Build the vendored, unmodified renderer (only needed once, or after
+# updating the submodule):
+./scripts/build-renderer.sh
+
+cargo build --release
+```
+
+## Running
+
+```sh
+cargo run --release
+```
+
+On first run you'll be prompted by KDE's portal to grant:
+global shortcuts, remote desktop (input injection), screencast (part of
+the RemoteDesktop session), and clipboard access. These are required for
+hotkeys and price-check to work at all.
+
+The overlay is a transparent, click-through, always-on-top layer-shell
+surface. Toggle it and trigger a price-check with the same hotkeys as
+stock APT (Shift+Space to toggle, Ctrl+D to price-check, Ctrl+Alt+D for a
+locked price-check) — see [WIP.md](WIP.md) if you want to change them,
+since they're currently hardcoded rather than read from APT's own Settings.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The vendored `awakened-poe-trade` submodule
+keeps its own MIT license.
