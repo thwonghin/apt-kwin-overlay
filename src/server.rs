@@ -183,7 +183,14 @@ fn handle_websocket(
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
 ) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    // Kept short deliberately: this connection's read() call holds the same
+    // mutex that broadcast()/send_last_active() need to send anything to
+    // this client (e.g. closing the price-check popup in response to its
+    // own "x" button). A long timeout here meant every outgoing message had
+    // to wait for the current blocking read to time out first, making
+    // closes feel sluggish — 200ms was the original value and was
+    // noticeably laggy in testing.
+    stream.set_read_timeout(Some(Duration::from_millis(15)))?;
     let ws = match tungstenite::accept(stream) {
         Ok(ws) => ws,
         Err(err) => {
