@@ -24,6 +24,7 @@ pub fn spawn(
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
 ) {
+    let price_check_open = Rc::new(Cell::new(false));
     glib::spawn_future_local(async move {
         if let Err(err) = run(
             &window,
@@ -32,6 +33,7 @@ pub fn spawn(
             &kwin_connection,
             &remote_input,
             &events,
+            &price_check_open,
         )
         .await
         {
@@ -47,6 +49,7 @@ async fn run(
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
+    price_check_open: &Rc<Cell<bool>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy.create_session(CreateSessionOptions::default()).await?;
@@ -80,7 +83,9 @@ async fn run(
     while let Some(event) = activated.next().await {
         match event.shortcut_id() {
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
-            PRICE_CHECK_ID => price_check(kwin_connection, remote_input, events).await,
+            PRICE_CHECK_ID => {
+                price_check(kwin_connection, remote_input, events, price_check_open).await
+            }
             _ => {}
         }
     }
@@ -92,7 +97,17 @@ async fn price_check(
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
+    price_check_open: &Rc<Cell<bool>>,
 ) {
+    // Pressing the same hotkey again while the popup's open closes it --
+    // hide-exclusive-widget targets exactly this widget (unlike
+    // focus-change, which affects every hide-on-blur/hide-on-focus widget).
+    if price_check_open.get() {
+        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        price_check_open.set(false);
+        return;
+    }
+
     let cursor = {
         let connection = kwin_connection.borrow().clone();
         match connection {
@@ -153,4 +168,5 @@ async fn price_check(
             "focusOverlay": true,
         }),
     );
+    price_check_open.set(true);
 }
