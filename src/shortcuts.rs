@@ -314,8 +314,19 @@ fn spawn_auto_close(
     // hold-Ctrl-to-pin escape hatch we don't have; a bit more generous here
     // so small mouse drift while reading doesn't close it prematurely, but
     // not so generous it feels laggy to dismiss.
+    //
+    // POLL_INTERVAL was tried at 40ms for a snappier close, but each tick
+    // costs a full KWin loadScript/run/unloadScript D-Bus round trip plus
+    // temp-file I/O (query_cursor_pos is a one-shot mechanism, not meant for
+    // hot-loop polling) -- 25 of those a second was enough to make the whole
+    // compositor feel laggy, not just this popup. A push-based replacement
+    // (workspace.cursorPosChanged) was tried and reverted: the signal exists
+    // but doesn't actually fire on real mouse movement on this KWin version,
+    // so cursor tracking silently stopped updating and the popup never
+    // auto-closed at all. Back to 80ms, the original value, which never had
+    // either problem.
     const CLOSE_THRESHOLD: f64 = 80.0;
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
 
     glib::spawn_future_local(async move {
         loop {
