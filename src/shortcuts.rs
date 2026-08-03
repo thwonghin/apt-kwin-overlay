@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::kwin_tracker::WindowEvent;
 use crate::remote_input::RemoteInput;
 use crate::server::EventBus;
-use crate::toggle_click_through;
+use crate::{set_click_through, toggle_click_through};
 
 const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
 const PRICE_CHECK_ID: &str = "price-check";
@@ -28,6 +28,7 @@ pub fn spawn(
     active_window: Rc<RefCell<Option<WindowEvent>>>,
 ) {
     let price_check_open = Rc::new(Cell::new(false));
+    let price_check_locked = Rc::new(Cell::new(false));
     glib::spawn_future_local(async move {
         if let Err(err) = run(
             &window,
@@ -37,6 +38,7 @@ pub fn spawn(
             &remote_input,
             &events,
             &price_check_open,
+            &price_check_locked,
             &active_window,
         )
         .await
@@ -54,6 +56,7 @@ async fn run(
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
+    price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
@@ -92,10 +95,14 @@ async fn run(
             TOGGLE_OVERLAY_ID => toggle_click_through(window, toggle, click_through, events),
             PRICE_CHECK_ID => {
                 price_check(
+                    window,
+                    toggle,
+                    click_through,
                     kwin_connection,
                     remote_input,
                     events,
                     price_check_open,
+                    price_check_locked,
                     active_window,
                     false,
                 )
@@ -103,10 +110,14 @@ async fn run(
             }
             PRICE_CHECK_LOCKED_ID => {
                 price_check(
+                    window,
+                    toggle,
+                    click_through,
                     kwin_connection,
                     remote_input,
                     events,
                     price_check_open,
+                    price_check_locked,
                     active_window,
                     true,
                 )
@@ -120,10 +131,14 @@ async fn run(
 }
 
 async fn price_check(
+    window: &ApplicationWindow,
+    toggle: &Button,
+    click_through: &Rc<Cell<bool>>,
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
+    price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
     locked: bool,
 ) {
@@ -133,6 +148,13 @@ async fn price_check(
     if price_check_open.get() {
         events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
         price_check_open.set(false);
+        if price_check_locked.get() {
+            // Opening the locked popup switched click-through off so it
+            // could be interacted with; closing it should give control of
+            // the game back rather than leaving the user stuck interactive.
+            set_click_through(true, window, toggle, click_through, events);
+            price_check_locked.set(false);
+        }
         return;
     }
 
@@ -213,7 +235,12 @@ async fn price_check(
         }),
     );
     price_check_open.set(true);
-    if !locked {
+    if locked {
+        // The locked popup is meant to be interacted with (read, click,
+        // copy) without the game stealing clicks underneath it.
+        set_click_through(false, window, toggle, click_through, events);
+        price_check_locked.set(true);
+    } else {
         spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
     }
 }

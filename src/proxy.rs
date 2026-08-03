@@ -14,7 +14,17 @@ const PROXY_HOSTS: &[&str] = &[
     "www.poeprices.info",
 ];
 
-const STRIPPED_REQUEST_HEADERS: &[&str] = &["host", "origin", "content-length"];
+const STRIPPED_REQUEST_HEADERS: &[&str] = &["host", "origin", "content-length", "user-agent"];
+
+// Overridden rather than forwarded: our WebView's own User-Agent has
+// "Electron/32.0.0" tacked on purely as a local trick to satisfy the
+// renderer's navigator.userAgent-based overlay-mode check (IPC.ts). Sent
+// externally, that non-standard string looks like a bot signature to
+// Cloudflare (which fronts pathofexile.com) and got every request
+// rate-limited. Real APT's own proxy.ts does the same override
+// (app.userAgentFallback) rather than passing the renderer's UA through.
+const OUTBOUND_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 pub fn handle(
     stream: &mut TcpStream,
@@ -39,13 +49,13 @@ pub fn handle(
         .collect();
 
     let result = if method == "POST" {
-        let mut builder = agent.post(&url);
+        let mut builder = agent.post(&url).header("user-agent", OUTBOUND_USER_AGENT);
         for (key, value) in &forwarded_headers {
             builder = builder.header(*key, *value);
         }
         builder.send(body)
     } else {
-        let mut builder = agent.get(&url);
+        let mut builder = agent.get(&url).header("user-agent", OUTBOUND_USER_AGENT);
         for (key, value) in &forwarded_headers {
             builder = builder.header(*key, *value);
         }
