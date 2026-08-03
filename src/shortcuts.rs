@@ -3,9 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
-use ashpd::desktop::{CreateSessionOptions, Session};
+use ashpd::desktop::CreateSessionOptions;
 use ashpd::WindowIdentifier;
-use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use gtk4::{glib, ApplicationWindow, Button};
 use serde_json::json;
@@ -18,7 +17,6 @@ use crate::{set_click_through, toggle_click_through};
 const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
 const PRICE_CHECK_ID: &str = "price-check";
 const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
-const ESCAPE_ID: &str = "escape";
 
 pub fn spawn(
     window: ApplicationWindow,
@@ -31,18 +29,6 @@ pub fn spawn(
 ) {
     let price_check_open = Rc::new(Cell::new(false));
     let price_check_locked = Rc::new(Cell::new(false));
-
-    {
-        let window = window.clone();
-        let toggle = toggle.clone();
-        let click_through = click_through.clone();
-        let events = events.clone();
-        let price_check_open = price_check_open.clone();
-        let price_check_locked = price_check_locked.clone();
-        glib::spawn_future_local(async move {
-            escape_manager(window, toggle, click_through, events, price_check_open, price_check_locked).await;
-        });
-    }
 
     glib::spawn_future_local(async move {
         if let Err(err) = run(
@@ -157,114 +143,6 @@ async fn run(
     }
 
     Ok(())
-}
-
-/// Matches real APT's Escape handler (main/src/windowing/OverlayWindow.ts's
-/// `assertGameActive` on Escape/Ctrl+W) — force click-through back on and
-/// close any open overlay widgets, as an always-available safety hatch
-/// regardless of what's currently showing or which mode it's in.
-fn escape_all(
-    window: &ApplicationWindow,
-    toggle: &Button,
-    click_through: &Rc<Cell<bool>>,
-    events: &Arc<EventBus>,
-    price_check_open: &Rc<Cell<bool>>,
-    price_check_locked: &Rc<Cell<bool>>,
-) {
-    if price_check_open.get() {
-        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
-        price_check_open.set(false);
-    }
-    price_check_locked.set(false);
-    set_click_through(true, window, toggle, click_through, events);
-}
-
-/// Whether our own UI currently needs Escape to be able to close it: either
-/// the overlay is interactive (click-through off) or a price-check popup is
-/// showing (the non-locked popup keeps click-through on, so that alone
-/// doesn't cover it).
-fn escape_needed(click_through: &Rc<Cell<bool>>, price_check_open: &Rc<Cell<bool>>) -> bool {
-    !click_through.get() || price_check_open.get()
-}
-
-const ESCAPE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
-
-/// A global shortcut grab intercepts a key unconditionally, for every
-/// keypress matching it regardless of origin — including ones we ourselves
-/// inject via EIS. That made an earlier "forward Escape to the game" attempt
-/// via remote_input self-defeating: our own synthetic Escape just re-hit our
-/// own grab instead of reaching the game (silently absorbed by the
-/// debounce), so the game never actually saw it. The portal has no API for
-/// binding a shortcut conditionally, so the only way to let real Escape
-/// presses reach the game when we don't need them is to not hold the grab
-/// at all in that case — bind it in a dedicated session only while our own
-/// UI actually needs it, and release the session the moment it doesn't.
-async fn escape_manager(
-    window: ApplicationWindow,
-    toggle: Button,
-    click_through: Rc<Cell<bool>>,
-    events: Arc<EventBus>,
-    price_check_open: Rc<Cell<bool>>,
-    price_check_locked: Rc<Cell<bool>>,
-) {
-    loop {
-        while !escape_needed(&click_through, &price_check_open) {
-            glib::timeout_future(ESCAPE_POLL_INTERVAL).await;
-        }
-
-        let (session, mut activated) = match bind_escape_session(&window).await {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("[shortcuts] escape grab failed: {err}");
-                glib::timeout_future(ESCAPE_POLL_INTERVAL).await;
-                continue;
-            }
-        };
-        println!("[shortcuts] escape grabbed (overlay UI open)");
-
-        loop {
-            if !escape_needed(&click_through, &price_check_open) {
-                break;
-            }
-            let tick = Box::pin(glib::timeout_future(ESCAPE_POLL_INTERVAL));
-            let next_event = Box::pin(activated.next());
-            match select(tick, next_event).await {
-                Either::Left(_) => continue,
-                Either::Right((Some(event), _)) => {
-                    if event.shortcut_id() == ESCAPE_ID {
-                        println!("[shortcuts] escape fired");
-                        escape_all(&window, &toggle, &click_through, &events, &price_check_open, &price_check_locked);
-                    }
-                }
-                Either::Right((None, _)) => {
-                    eprintln!("[shortcuts] escape activation stream ended");
-                    break;
-                }
-            }
-        }
-
-        let _ = session.close().await;
-        println!("[shortcuts] escape released");
-    }
-}
-
-async fn bind_escape_session(
-    window: &ApplicationWindow,
-) -> ashpd::Result<(
-    Session<GlobalShortcuts>,
-    impl futures_util::Stream<Item = ashpd::desktop::global_shortcuts::Activated>,
-)> {
-    let proxy = GlobalShortcuts::new().await?;
-    let session = proxy.create_session(CreateSessionOptions::default()).await?;
-    let window_id = WindowIdentifier::from_native(window).await;
-    let shortcuts = [NewShortcut::new(ESCAPE_ID, "Close all overlay UI and return to the game")
-        .preferred_trigger(Some("Escape"))];
-    let request = proxy
-        .bind_shortcuts(&session, &shortcuts, window_id.as_ref(), BindShortcutsOptions::default())
-        .await?;
-    request.response()?;
-    let activated = proxy.receive_activated().await?;
-    Ok((session, activated))
 }
 
 async fn price_check(
