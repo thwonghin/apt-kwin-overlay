@@ -247,3 +247,31 @@ open the browser UI instead, or drop the item.
    can provide one before committing to an approach.
 8. §7 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
+
+## Productionalization: non-feature gaps
+
+Separate axis from everything above — not feature parity with upstream
+APT, just packaging/robustness of this repo's own Rust backend. Audited
+2026-08-03.
+
+**Done**: PKGBUILD (`makepkg -si` local install on Arch/CachyOS — not
+published to AUR, registration's closed to new accounts); GitHub Actions
+`ci.yml` (build check every push/PR), `bump-submodule.yml` (daily poll +
+validated PR for upstream awakened-poe-trade commits), `release.yml`
+(tag push → build → GitHub Release with a tarball); `server.rs`'s renderer
+asset path now resolves at runtime (`APT_KWIN_OVERLAY_DIST` env var →
+`/usr/share/apt-kwin-overlay/dist` → dev fallback via `.cargo/config.toml`)
+instead of baking in a build-time path that broke once packaged.
+
+**Remaining**:
+
+1. Crash resilience — `main.rs:57`: `server::spawn().expect(...)` panics
+   the whole app with no user-facing message if the local port's already
+   bound (e.g. a second instance launched by accident). Real reliability
+   gap, worth doing first of these three.
+2. XDG basedir non-compliance — `config_store.rs`, `uploads.rs`,
+   `remote_input.rs` all read `$HOME` directly (`.expect("HOME must be
+   set")`) instead of `XDG_CONFIG_HOME`/`XDG_DATA_HOME`. Cosmetic today.
+3. Branding never left prototype stage — `APP_ID` is
+   `dev.spike.apt_kwin_overlay`, window title says "apt-kwin-overlay
+   spike". Cosmetic, worth fixing before wider use.
