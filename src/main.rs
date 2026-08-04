@@ -22,6 +22,19 @@ use webkit6::WebView;
 pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
 
 fn main() -> glib::ExitCode {
+    // GTK4 auto-selects its Vulkan GSK renderer on this NVIDIA setup, which
+    // turned out to burn 80-140% CPU compositing our fullscreen transparent
+    // surface during any WebView scroll/animation (measured via /proc/*/stat
+    // deltas) -- WebKit's own rendering stayed under 3% the whole time, so
+    // this was never a WebKit/hardware-acceleration problem. Forcing the
+    // older OpenGL (ngl) renderer dropped that to ~4%. Only set as a
+    // default -- an explicit GSK_RENDERER in the environment (e.g. someone
+    // testing a driver fix) should still win.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: first line of main, no other threads exist yet.
+        unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+    }
+
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
