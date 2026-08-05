@@ -7,34 +7,46 @@ against what `apt-kwin-overlay`'s Rust backend actually implements. The renderer
 
 Ordered roughly by how much it'd actually change day-to-day use, not by file.
 
-## 1. Hotkeys are hardcoded, not config-driven (biggest gap)
+## 1. Hotkeys are hardcoded, not config-driven — DONE, but landed differently than planned
 
-Real APT (`shortcuts/Shortcuts.ts`) reads the user's **configured** hotkey list
-from `CLIENT->MAIN::update-host-config` (`cfg.shortcuts: ShortcutAction[]`) and
-registers whatever the user set in Settings — arbitrary count, arbitrary keys,
-arbitrary action types. Our `shortcuts.rs` hardcodes exactly three: Shift+Space
-(toggle), Ctrl+D (price-check), Ctrl+Alt+D (price-check-locked). We never
-listen for `update-host-config` at all.
+Implemented: parses `CLIENT->MAIN::update-host-config`'s `cfg.shortcuts:
+ShortcutAction[]` and dynamically binds via `ashpd`'s `GlobalShortcuts`
+portal (`host_config.rs`, `shortcuts.rs`), scoped to the `copy-item` and
+`toggle-overlay` action types — the ones our `price_check()`/
+`toggle_click_through()` already implemented; the actual gap was that the
+*set of bound shortcuts* was fixed at 3.
 
-Concretely, this means: if a user opens Settings → Hotkeys in the (real,
-unmodified) renderer and changes/adds anything, nothing happens on our side —
-the UI shows the setting persisted, but our backend has no idea.
+Key design departure from a straightforward port of `Shortcuts.ts`:
+confirmed empirically (checking `~/.config/kglobalshortcutsrc` live) that
+the portal has no way to silently rebind an already-granted id's trigger —
+`bind_shortcuts` only lets a brand-new id claim a trigger; calling it again
+for a known id with a different `preferred_trigger` does nothing, and
+KDE's kglobalaccel also replaces an app's *entire* grant set with whatever
+the latest call supplies rather than adding to it (the full accumulated
+list has to be resupplied every call, not just the delta). So shortcut ids
+are content-stable (action type + target + `focus_overlay`, never the
+trigger key itself) — which means the renderer's own hotkey editing no
+longer has any effect once an id is first granted. **KDE's own Global
+Shortcuts (System Settings, or `ConfigureShortcuts`) is now the one place a
+user actually assigns keys**, matching how the portal model expects
+shortcut management to work in general, not just for us. The renderer's
+Hotkeys and Item Info tabs (real, unmodified upstream Vue UI) stay
+reachable, but their content is replaced with an explanatory banner via
+injected JS (`main.rs`'s `HOTKEY_UI_INFO_JS`, `WebKitUserContentManager`)
+rather than forking the submodule.
 
-Action types we don't have at all (all from `Shortcuts.ts`'s `register()`):
-- `paste-in-chat` (custom chat macros, `text-box.ts`'s `typeInChat` — supports
-  `@last` placeholder for whisper-reply, auto-clear logic per chat channel)
-- `trigger-event` (generic `MAIN->CLIENT::widget-action` fire, used for
-  non-price-check widgets)
-- `stash-search` (`text-box.ts`'s `stashSearch` — Ctrl+F + paste + Enter in
-  the stash search box)
-- `ocr-text` for heist gems (Windows-only upstream via `vision/`, skip)
+All `copy-item` targets the original UI could ever configure (price-check
+unlocked/locked, item-check, wiki/PoEDB/Craft of Exile/find-in-stash) are
+pre-registered at startup (`host_config::extra_registerable_actions`) with
+no default trigger, purely so they show up as nameable, bindable entries in
+KDE's Shortcuts KCM — otherwise there'd be no way to ever discover or
+enable them, since the renderer UI that used to expose them no longer does.
 
-Real fix shape: parse `cfg.shortcuts` on `CLIENT->MAIN::update-host-config`,
-rebuild our `ashpd` `NewShortcut` list from it instead of the fixed 3, dispatch
-by `action.type` the same way `Shortcuts.ts` does. This is a genuinely large
-change — probably its own phase, not a quick patch, since dynamic re-binding
-of the whole shortcut set has the same "portal session churn" caveats we hit
-building the Escape-only session (see §6).
+Still not implemented (parsed as `ActionKind::Unsupported`, inert):
+- `paste-in-chat`, `trigger-event`, `stash-search` — need EIS text-injection
+  + clipboard-write primitives that don't exist in `remote_input.rs` yet.
+- `ocr-text` (heist gems) — Windows-only upstream, correctly out of scope
+  regardless of platform (see §12).
 
 ## 2. Stash scroll-wheel navigation
 
@@ -68,7 +80,8 @@ Real `readItemText()`:
 
 Real fix shape: port the poll-with-timeout + language-signature-validation
 loop into `remote_input.rs::read_clipboard_text`, add a `restoreClipboard`
-config flag once §1's config plumbing exists.
+config flag — §1's config plumbing (`host_config.rs`) exists now, so this
+is unblocked; just needs its own pass.
 
 ## 4. No hover-to-interact / hold-modifier-to-pin for the price-check popup
 
@@ -238,9 +251,11 @@ open the browser UI instead, or drop the item.
 5. §11 (tray icon, likely via `ksni`) — medium, self-contained (one new
    module), and the only real way to quit/reopen the app without a terminal —
    worth doing before this gets used outside active dev/testing.
-6. §1 (config-driven hotkeys) — large, but is the prerequisite for §2's
-   stash-scroll and unlocks paste-in-chat/stash-search "for free" once the
-   dispatch plumbing exists.
+6. ~~§1 (config-driven hotkeys)~~ — done, though it landed as "centralized
+   in KDE Global Shortcuts" rather than a literal port of `Shortcuts.ts`
+   (see §1). Doesn't unlock paste-in-chat/stash-search "for free" the way
+   originally hoped — those still need their own EIS text-injection +
+   clipboard-write primitives, tracked in §1's own remaining list.
 7. §4/§5 (hover-to-interact, hold-to-pin, Alt-hold-hide) — blocked on having
    a live modifier-key/cursor stream we don't currently have; needs its own
    spike to figure out whether KWin scripting or another portal capability
