@@ -1,4 +1,5 @@
 mod config_store;
+mod host_config;
 mod kwin_tracker;
 mod logger;
 mod proxy;
@@ -13,13 +14,130 @@ use std::rc::Rc;
 
 use gtk4::cairo::Region;
 use gtk4::prelude::*;
-use gtk4::{glib, Application, ApplicationWindow};
+use gtk4::{Application, ApplicationWindow, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kwin_tracker::TrackerEvent;
-use webkit6::prelude::*;
 use webkit6::WebView;
+use webkit6::prelude::*;
 
 pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
+
+// Hotkeys are configured exclusively through KDE's own Global Shortcuts
+// (System Settings, or ashpd's ConfigureShortcuts), not the renderer's own
+// Settings UI — that UI is real, unmodified upstream Vue code we don't
+// patch, so instead of hiding the tabs that reach them, we keep the tabs
+// reachable but replace their content with a single explanatory banner,
+// worded as a plain statement of where hotkeys live now (not as "this used
+// to work here" — this app's own hotkey editing UI never actually took
+// effect for most users anyway once ids became trigger-independent).
+// Detected by literal English marker text (renderer/public/data/en/
+// app_i18n.json) — only correct for the English locale; ponytail: good
+// enough for now, a non-English label just means the tab's original
+// content stays visible instead of being replaced, rather than anything
+// breaking:
+//   - "Hotkeys" tab (renderer/src/web/settings/hotkeys.vue) — detected via
+//     its "You can clear hotkey by pressing Backspace" hint box, which is
+//     always the first thing that tab renders. Only that hint box and the
+//     rows container right after it get replaced/hidden — the stash-scroll
+//     radio is a later, unrelated real setting and stays untouched.
+//   - "Item info" tab (item-check/settings-item-check.vue) — no equivalent
+//     static hint box, so detected via its first hotkey row's own label
+//     ("Open item on wiki"). This tab's entire content is hotkey rows, so
+//     everything in it gets hidden, leaving just the banner.
+// Not annotated: stash-search/stopwatch/chat-command/ocr-gems hotkey
+// fields — those map to action types we don't bind at all (Unsupported),
+// so editing them has always been inert; that's a pre-existing
+// WIP.md-documented gap, not something today's stable-id change made worse.
+//
+// Price Check's own tab keeps a real, functional pair of toggles ("smart
+// initial search" / "locked initial search" — price-check/
+// settings-price-check.vue) that happen to also render the relevant
+// hotkey as a small text label next to each one, purely for the user's
+// reference. The toggles themselves aren't hotkey config, so the whole
+// row stays visible; only that now-possibly-stale label text (its source
+// config value no longer reflects the real KDE-owned trigger) gets
+// replaced with a pointer to where the actual key now lives, found the
+// same way — by the literal English label of the row it's in.
+const HOTKEY_UI_INFO_JS: &str = r#"
+(function () {
+  var CLEAR_HOTKEY_TEXT = 'You can clear hotkey by pressing Backspace';
+  var ITEM_CHECK_FIRST_LABEL = 'Open item on wiki';
+  var AUTO_SEARCH_LABEL = 'Perform an auto search, when pressing';
+  var BANNER_TEXT = 'Hotkeys are configured in KDE System Settings → Shortcuts.';
+
+  function makeBanner() {
+    var banner = document.createElement('div');
+    banner.textContent = BANNER_TEXT;
+    banner.style.cssText =
+      'margin-bottom:0.75rem;padding:0.5rem;border-radius:0.25rem;' +
+      'background:#7c2d12;color:#fed7aa;font-size:0.875rem;';
+    return banner;
+  }
+
+  function addHotkeyUiInfo() {
+    // Hotkeys tab: the hint box + the rows container that follows it are
+    // the only two children that are actually hotkey UI — the stash-scroll
+    // radio (a real, unrelated setting) is a later sibling and stays put.
+    var divs = document.querySelectorAll('div');
+    for (var i = 0; i < divs.length; i++) {
+      var marker = divs[i];
+      if (marker.dataset.aptBannerAdded) continue;
+      if (marker.textContent.trim() !== CLEAR_HOTKEY_TEXT) continue;
+      var tabRoot = marker.parentElement;
+      if (!tabRoot) continue;
+      var rowsContainer = marker.nextElementSibling;
+      tabRoot.insertBefore(makeBanner(), marker);
+      marker.style.display = 'none';
+      if (rowsContainer) rowsContainer.style.display = 'none';
+      marker.dataset.aptBannerAdded = '1';
+    }
+
+    // Item info tab: its entire content is hotkey rows (no unrelated
+    // settings mixed in), so every existing child of the tab root gets
+    // hidden and the banner becomes the tab's only visible content.
+    var labels = document.querySelectorAll('label');
+    for (var j = 0; j < labels.length; j++) {
+      if (labels[j].textContent.trim().indexOf(ITEM_CHECK_FIRST_LABEL) !== 0) continue;
+      var firstRow = labels[j].parentElement;
+      var tabRoot2 = firstRow ? firstRow.parentElement : null;
+      if (!tabRoot2 || tabRoot2.dataset.aptBannerAdded) continue;
+      tabRoot2.dataset.aptBannerAdded = '1';
+      var existingRows = Array.prototype.slice.call(tabRoot2.children);
+      tabRoot2.insertBefore(makeBanner(), tabRoot2.firstChild);
+      for (var r = 0; r < existingRows.length; r++) existingRows[r].style.display = 'none';
+    }
+
+    var searchDivs = document.querySelectorAll('div');
+    for (var k = 0; k < searchDivs.length; k++) {
+      var el = searchDivs[k];
+      if (el.dataset.aptLabelsFixed || el.children.length > 0) continue;
+      if (el.textContent.trim() !== AUTO_SEARCH_LABEL) continue;
+      el.dataset.aptLabelsFixed = '1';
+      var container = el.nextElementSibling;
+      if (!container) continue;
+      // Source order matches Vue's v-if order: hotkeyQuick's span (if
+      // rendered) always comes before hotkeyLocked's — same two terms
+      // settings/hotkeys.vue itself uses for these ("Auto-hide Mode" /
+      // "Open without auto-hide") so the label stays recognizable, just
+      // without a specific (and potentially stale) key combo.
+      var spans = container.querySelectorAll('span');
+      var SPAN_LABELS = ['Auto-hide (KDE)', 'No auto-hide (KDE)'];
+      for (var m = 0; m < spans.length; m++) {
+        spans[m].textContent = SPAN_LABELS[m] || 'Set in KDE';
+        spans[m].style.whiteSpace = 'nowrap';
+      }
+    }
+  }
+  // ponytail: whole-document MutationObserver rather than scoping to the
+  // settings window container specifically — simplest thing that works,
+  // scope tighter if it ever shows up as a real perf cost.
+  new MutationObserver(addHotkeyUiInfo).observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
+  addHotkeyUiInfo();
+})();
+"#;
 
 fn main() -> glib::ExitCode {
     // GTK4 auto-selects its Vulkan GSK renderer on this NVIDIA setup, which
@@ -77,22 +195,37 @@ fn build_ui(app: &Application) {
                 .detail(format!("Could not start the local server: {err}"))
                 .build();
             let app = app.clone();
-            dialog.choose(None::<&ApplicationWindow>, gtk4::gio::Cancellable::NONE, move |_| {
-                app.quit();
-            });
+            dialog.choose(
+                None::<&ApplicationWindow>,
+                gtk4::gio::Cancellable::NONE,
+                move |_| {
+                    app.quit();
+                },
+            );
             return;
         }
     };
     println!("[main] server listening on 127.0.0.1:{port}");
 
-    let webview = WebView::new();
+    let user_content = webkit6::UserContentManager::new();
+    user_content.add_script(&webkit6::UserScript::new(
+        HOTKEY_UI_INFO_JS,
+        webkit6::UserContentInjectedFrames::TopFrame,
+        webkit6::UserScriptInjectionTime::End,
+        &[],
+        &[],
+    ));
+    let webview = WebView::builder().user_content_manager(&user_content).build();
     webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
     // The renderer only enables overlay-mode behavior (vs. plain-browser
     // mode) when navigator.userAgent contains "Electron"
     // (renderer/src/web/background/IPC.ts) — we're WebKitGTK, not Electron,
     // so without this it would silently fall back to browser mode.
     if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
-        let ua = settings.user_agent().map(|s| s.to_string()).unwrap_or_default();
+        let ua = settings
+            .user_agent()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         settings.set_user_agent(Some(&format!("{ua} Electron/32.0.0")));
 
         // Confirmed via testing: this is WebKit's own default already (not
@@ -187,6 +320,7 @@ fn build_ui(app: &Application) {
         let events = backend.events.clone();
         let active_window = active_window.clone();
         let focus_game_rx = backend.focus_game_rx.clone();
+        let shortcut_config_rx = backend.shortcut_config_rx.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -214,6 +348,7 @@ fn build_ui(app: &Application) {
                 events,
                 active_window,
                 focus_game_rx,
+                shortcut_config_rx,
             );
         });
     }
@@ -222,7 +357,11 @@ fn build_ui(app: &Application) {
 /// `can-target` only affects GTK's own internal hit-testing, not the input
 /// region the compositor is told about — that requires poking the surface
 /// directly, or clicks keep landing on our window no matter what.
-fn toggle_click_through(window: &ApplicationWindow, click_through: &Rc<Cell<bool>>, events: &server::EventBus) {
+fn toggle_click_through(
+    window: &ApplicationWindow,
+    click_through: &Rc<Cell<bool>>,
+    events: &server::EventBus,
+) {
     set_click_through(!click_through.get(), window, click_through, events);
 }
 
@@ -274,7 +413,9 @@ fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationW
         KeyboardMode::OnDemand
     });
 
-    let Some(surface) = window.surface() else { return };
+    let Some(surface) = window.surface() else {
+        return;
+    };
     if now_click_through {
         surface.set_input_region(Some(&Region::create()));
     } else {
@@ -304,8 +445,12 @@ fn move_overlay_to_window_monitor(
 
     let monitors = display.monitors();
     for i in 0..monitors.n_items() {
-        let Some(obj) = monitors.item(i) else { continue };
-        let Ok(monitor) = obj.downcast::<gtk4::gdk::Monitor>() else { continue };
+        let Some(obj) = monitors.item(i) else {
+            continue;
+        };
+        let Ok(monitor) = obj.downcast::<gtk4::gdk::Monitor>() else {
+            continue;
+        };
         let geo = monitor.geometry();
         let (mx, my, mw, mh) = (
             geo.x() as f64,

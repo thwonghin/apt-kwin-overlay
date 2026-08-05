@@ -1,22 +1,23 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
-use ashpd::desktop::CreateSessionOptions;
 use ashpd::WindowIdentifier;
+use ashpd::desktop::CreateSessionOptions;
+use ashpd::desktop::Session;
+use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
-use gtk4::{glib, ApplicationWindow};
+use gtk4::{ApplicationWindow, glib};
 use serde_json::json;
 
+use crate::host_config::{
+    ActionKind, ShortcutAction, default_actions, extra_registerable_actions, shortcut_id,
+};
 use crate::kwin_tracker::WindowEvent;
 use crate::remote_input::RemoteInput;
 use crate::server::EventBus;
 use crate::{set_click_through, toggle_click_through};
-
-const TOGGLE_OVERLAY_ID: &str = "toggle-overlay";
-const PRICE_CHECK_ID: &str = "price-check";
-const PRICE_CHECK_LOCKED_ID: &str = "price-check-locked";
 
 pub fn spawn(
     window: ApplicationWindow,
@@ -26,6 +27,7 @@ pub fn spawn(
     events: Arc<EventBus>,
     active_window: Rc<RefCell<Option<WindowEvent>>>,
     focus_game_rx: async_channel::Receiver<()>,
+    shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
 ) {
     let price_check_open = Rc::new(Cell::new(false));
     let price_check_locked = Rc::new(Cell::new(false));
@@ -42,7 +44,13 @@ pub fn spawn(
             // assertGameActive handler for the same event) — it expects us to
             // actually restore click-through and close whatever's open.
             while focus_game_rx.recv().await.is_ok() {
-                close_all_ui(&window, &click_through, &events, &price_check_open, &price_check_locked);
+                close_all_ui(
+                    &window,
+                    &click_through,
+                    &events,
+                    &price_check_open,
+                    &price_check_locked,
+                );
             }
         });
     }
@@ -57,6 +65,7 @@ pub fn spawn(
             &price_check_open,
             &price_check_locked,
             &active_window,
+            shortcut_config_rx,
         )
         .await
         {
@@ -76,11 +85,107 @@ fn close_all_ui(
     price_check_locked: &Rc<Cell<bool>>,
 ) {
     if price_check_open.get() {
-        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        events.broadcast(
+            "MAIN->OVERLAY::hide-exclusive-widget",
+            serde_json::Value::Null,
+        );
         price_check_open.set(false);
     }
     price_check_locked.set(false);
     set_click_through(true, window, click_through, events);
+}
+
+/// Binds any actions not already bound this session and refreshes the
+/// dispatch map from `actions`. Confirmed empirically against a live KDE
+/// session (checking ~/.config/kglobalshortcutsrc after two separate
+/// bind_shortcuts calls): the portal's own doc calls BindShortcuts additive,
+/// but KDE's kglobalaccel backend actually replaces this app-id's *entire*
+/// persisted grant set with whatever's supplied in the *latest* call — a
+/// second call with only the newly-added shortcuts silently dropped every
+/// previously-bound one. So `all_shortcuts` accumulates every NewShortcut
+/// we've ever wanted bound (keyed by id, never shrinks) and the *full*
+/// accumulated list is resupplied on every call that has anything new,
+/// never just the delta. `dispatch` is wholesale-replaced each call from
+/// the current config only, so actions dropped from it simply have no
+/// entry left to look up (their old id, if pressed, is a harmless no-op).
+/// Since `host_config::shortcut_id` is now trigger-independent (stable per
+/// action, not per hotkey — see its doc comment), a "dropped" id here means
+/// the action itself disappeared from config (e.g. a widget got disabled),
+/// not that its hotkey merely changed — changing the hotkey no longer
+/// touches `all_shortcuts`/`dispatch` at all, since the id doesn't change.
+async fn apply_shortcuts(
+    proxy: &GlobalShortcuts,
+    session: &Session<GlobalShortcuts>,
+    window_id: Option<&WindowIdentifier>,
+    all_shortcuts: &Rc<RefCell<HashMap<String, NewShortcut>>>,
+    dispatch: &Rc<RefCell<HashMap<String, ShortcutAction>>>,
+    actions: Vec<ShortcutAction>,
+) -> ashpd::Result<()> {
+    let mut added_new = false;
+    let mut fresh_dispatch = HashMap::new();
+
+    for action in actions {
+        let Some(id) = shortcut_id(&action) else {
+            continue;
+        };
+        if !all_shortcuts.borrow().contains_key(&id) {
+            let description = match &action.action {
+                // Matches real APT's own action type name ('toggle-overlay')
+                // and the row's own label in hotkeys.vue ("Overlay") rather
+                // than leaking our internal click-through implementation
+                // detail into KDE's user-facing Shortcuts list.
+                ActionKind::ToggleOverlay => "Toggle overlay".to_string(),
+                // Locked/unlocked price-check share the same target
+                // ("price-check") — without the focus_overlay suffix both
+                // would show up in KDE's own Shortcuts list under the
+                // identical name "Copy item (price-check)", indistinguishable
+                // from each other there.
+                ActionKind::CopyItem {
+                    target,
+                    focus_overlay: true,
+                } => format!("Copy item ({target}, locked)"),
+                ActionKind::CopyItem {
+                    target,
+                    focus_overlay: false,
+                } => format!("Copy item ({target})"),
+                ActionKind::Unsupported => unreachable!(),
+            };
+            // Empty shortcut (extra_registerable_actions' unset-by-default
+            // entries) -> empty trigger -> register with no preferred
+            // trigger at all, so it still shows up in KDE's own Global
+            // Shortcuts settings as a nameable, bindable-but-currently-unset
+            // entry rather than silently not existing there.
+            let trigger = crate::host_config::to_portal_trigger(&action.shortcut);
+            let preferred_trigger = if trigger.is_empty() { None } else { Some(trigger.as_str()) };
+            let new_shortcut = NewShortcut::new(id.clone(), description).preferred_trigger(preferred_trigger);
+            all_shortcuts.borrow_mut().insert(id.clone(), new_shortcut);
+            added_new = true;
+        }
+        fresh_dispatch.insert(id, action);
+    }
+
+    if added_new {
+        let full_list: Vec<NewShortcut> = all_shortcuts.borrow().values().cloned().collect();
+        let request = proxy
+            .bind_shortcuts(
+                session,
+                &full_list,
+                window_id,
+                BindShortcutsOptions::default(),
+            )
+            .await?;
+        let bound = request.response()?;
+        for s in bound.shortcuts() {
+            println!(
+                "[shortcuts] bound {} -> {}",
+                s.id(),
+                s.trigger_description()
+            );
+        }
+    }
+
+    *dispatch.borrow_mut() = fresh_dispatch;
+    Ok(())
 }
 
 async fn run(
@@ -92,36 +197,34 @@ async fn run(
     price_check_open: &Rc<Cell<bool>>,
     price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
+    shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
-    let session = proxy.create_session(CreateSessionOptions::default()).await?;
-
-    let window_id = WindowIdentifier::from_native(window).await;
-    let shortcuts = [
-        NewShortcut::new(TOGGLE_OVERLAY_ID, "Toggle click-through")
-            .preferred_trigger(Some("SHIFT+space")),
-        NewShortcut::new(PRICE_CHECK_ID, "Price-check hovered item")
-            .preferred_trigger(Some("CTRL+d")),
-        NewShortcut::new(PRICE_CHECK_LOCKED_ID, "Price-check hovered item (locked open)")
-            .preferred_trigger(Some("CTRL+ALT+d")),
-    ];
-
-    let request = proxy
-        .bind_shortcuts(
-            &session,
-            &shortcuts,
-            window_id.as_ref(),
-            BindShortcutsOptions::default(),
-        )
+    let session = proxy
+        .create_session(CreateSessionOptions::default())
         .await?;
-    let bound = request.response()?;
-    for s in bound.shortcuts() {
-        println!(
-            "[shortcuts] bound {} -> {}",
-            s.id(),
-            s.trigger_description()
-        );
-    }
+    let window_id = WindowIdentifier::from_native(window).await;
+
+    let all_shortcuts: Rc<RefCell<HashMap<String, NewShortcut>>> = Rc::new(RefCell::new(HashMap::new()));
+    let dispatch: Rc<RefCell<HashMap<String, ShortcutAction>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    // Registers every copy-item target the original renderer UI could ever
+    // configure, not just the 3 with a sensible default trigger — otherwise,
+    // since our Hotkeys/Item Info tabs no longer expose a way to set them,
+    // there'd be no way to ever discover or enable them via KDE's own
+    // Global Shortcuts settings either.
+    let mut initial_actions = default_actions();
+    initial_actions.extend(extra_registerable_actions());
+    apply_shortcuts(
+        &proxy,
+        &session,
+        window_id.as_ref(),
+        &all_shortcuts,
+        &dispatch,
+        initial_actions,
+    )
+    .await?;
 
     // Debounce: the portal has been observed emitting multiple Activated
     // signals for what looked like a single physical keypress (several
@@ -132,6 +235,32 @@ async fn run(
     let mut last_activation: Option<std::time::Instant> = None;
 
     let mut activated = proxy.receive_activated().await?;
+
+    // Live-updates the same session's bindings whenever the renderer sends
+    // a new CLIENT->MAIN::update-host-config — moved into its own task since
+    // it needs to hold proxy/session for the rest of the app's lifetime,
+    // same as the activation loop below.
+    {
+        let all_shortcuts = all_shortcuts.clone();
+        let dispatch = dispatch.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(actions) = shortcut_config_rx.recv().await {
+                if let Err(err) = apply_shortcuts(
+                    &proxy,
+                    &session,
+                    window_id.as_ref(),
+                    &all_shortcuts,
+                    &dispatch,
+                    actions,
+                )
+                .await
+                {
+                    eprintln!("[shortcuts] failed to apply updated shortcuts: {err}");
+                }
+            }
+        });
+    }
+
     while let Some(event) = activated.next().await {
         let now = std::time::Instant::now();
         if last_activation.is_some_and(|t| now.duration_since(t) < DEBOUNCE) {
@@ -139,9 +268,21 @@ async fn run(
         }
         last_activation = Some(now);
 
-        match event.shortcut_id() {
-            TOGGLE_OVERLAY_ID => toggle_click_through(window, click_through, events),
-            PRICE_CHECK_ID => {
+        let Some(action) = dispatch.borrow().get(event.shortcut_id()).cloned() else {
+            continue;
+        };
+        match action.action {
+            ActionKind::ToggleOverlay => {
+                println!(
+                    "[shortcuts] toggle-overlay activated, click_through was {}",
+                    click_through.get()
+                );
+                toggle_click_through(window, click_through, events)
+            }
+            ActionKind::CopyItem {
+                target,
+                focus_overlay,
+            } => {
                 price_check(
                     window,
                     click_through,
@@ -151,31 +292,24 @@ async fn run(
                     price_check_open,
                     price_check_locked,
                     active_window,
-                    false,
+                    &target,
+                    focus_overlay,
                 )
                 .await
             }
-            PRICE_CHECK_LOCKED_ID => {
-                price_check(
-                    window,
-                    click_through,
-                    kwin_connection,
-                    remote_input,
-                    events,
-                    price_check_open,
-                    price_check_locked,
-                    active_window,
-                    true,
-                )
-                .await
-            }
-            _ => {}
+            ActionKind::Unsupported => {}
         }
     }
 
     Ok(())
 }
 
+/// Handles any `copy-item` action: presses Ctrl+C, reads the clipboard, and
+/// broadcasts item-text with whatever `target` the bound action specifies
+/// (real APT's own copy-item targets aren't just "price-check" — open-wiki,
+/// open-craft-of-exile, open-poedb, search-similar, and item-check all go
+/// through this same flow, per renderer/src/web/Config.ts's
+/// getConfigForHost — the renderer decides what UI to show per target).
 async fn price_check(
     window: &ApplicationWindow,
     click_through: &Rc<Cell<bool>>,
@@ -185,17 +319,21 @@ async fn price_check(
     price_check_open: &Rc<Cell<bool>>,
     price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
-    locked: bool,
+    target: &str,
+    focus_overlay: bool,
 ) {
     println!(
-        "[shortcuts] price_check called, locked={locked}, price_check_open={}",
+        "[shortcuts] price_check called, target={target}, focus_overlay={focus_overlay}, price_check_open={}",
         price_check_open.get()
     );
     // Pressing the same hotkey again while the popup's open closes it --
     // hide-exclusive-widget targets exactly this widget (unlike
     // focus-change, which affects every hide-on-blur/hide-on-focus widget).
     if price_check_open.get() {
-        events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        events.broadcast(
+            "MAIN->OVERLAY::hide-exclusive-widget",
+            serde_json::Value::Null,
+        );
         price_check_open.set(false);
         if price_check_locked.get() {
             // Opening the locked popup switched click-through off so it
@@ -271,30 +409,37 @@ async fn price_check(
         clipboard.len()
     );
 
-    // "price-check" is the target the renderer's PriceCheckWindow.vue
-    // actually listens for. focusOverlay matches the real app's two default
-    // hotkeys (renderer/src/web/price-check/PriceCheckWindow.vue): plain
-    // Ctrl+D sends focusOverlay:false and auto-closes on mouse-move-away;
-    // Ctrl+Alt+D ("hotkeyLocked") sends focusOverlay:true, which skips that
-    // (real APT's own hover-to-interact replacement for the auto-close
-    // path — ours is a simpler Rust-side poll, see spawn_auto_close).
+    // `target` is whatever the bound action's config specifies (e.g. the
+    // renderer's PriceCheckWindow.vue listens for target:"price-check").
+    // focusOverlay matches the real app's own hotkey semantics (renderer/
+    // src/web/price-check/PriceCheckWindow.vue): plain Ctrl+D sends
+    // focusOverlay:false and auto-closes on mouse-move-away; Ctrl+Alt+D
+    // ("hotkeyLocked") sends focusOverlay:true, which skips that (real
+    // APT's own hover-to-interact replacement for the auto-close path —
+    // ours is a simpler Rust-side poll, see spawn_auto_close).
     events.send_last_active(
         "MAIN->CLIENT::item-text",
         json!({
-            "target": "price-check",
+            "target": target,
             "clipboard": clipboard,
             "position": { "x": x, "y": y },
-            "focusOverlay": locked,
+            "focusOverlay": focus_overlay,
         }),
     );
     price_check_open.set(true);
-    if locked {
+    if focus_overlay {
         // The locked popup is meant to be interacted with (read, click,
         // copy) without the game stealing clicks underneath it.
         set_click_through(false, window, click_through, events);
         price_check_locked.set(true);
     } else {
-        spawn_auto_close(x, y, kwin_connection.clone(), events.clone(), price_check_open.clone());
+        spawn_auto_close(
+            x,
+            y,
+            kwin_connection.clone(),
+            events.clone(),
+            price_check_open.clone(),
+        );
     }
 }
 
@@ -337,14 +482,19 @@ fn spawn_auto_close(
             }
 
             let connection = kwin_connection.borrow().clone();
-            let Some(connection) = connection else { continue };
+            let Some(connection) = connection else {
+                continue;
+            };
             let Ok((x, y)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
                 continue;
             };
 
             let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
             if distance > CLOSE_THRESHOLD {
-                events.broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+                events.broadcast(
+                    "MAIN->OVERLAY::hide-exclusive-widget",
+                    serde_json::Value::Null,
+                );
                 price_check_open.set(false);
                 return;
             }

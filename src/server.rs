@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config_store::ConfigStore;
+use crate::host_config::ShortcutAction;
 use crate::logger::Logger;
 
 // `cargo run` gets APT_KWIN_OVERLAY_DIST for free from .cargo/config.toml's
@@ -41,30 +42,40 @@ pub struct EventBus {
     // connection's own thread over to the GTK main loop, which owns the
     // window/click-through state needed to act on it.
     focus_game_tx: async_channel::Sender<()>,
+    // Carries a freshly parsed CLIENT->MAIN::update-host-config shortcut
+    // list from the WS connection's own thread over to the GTK main loop's
+    // shortcuts.rs task, which owns the ashpd GlobalShortcuts session that
+    // needs to react to it. Same shape as focus_game_tx/rx above.
+    shortcut_config_tx: async_channel::Sender<Vec<ShortcutAction>>,
 }
 
 impl EventBus {
-    fn new() -> (Self, async_channel::Receiver<()>) {
+    fn new() -> (
+        Self,
+        async_channel::Receiver<()>,
+        async_channel::Receiver<Vec<ShortcutAction>>,
+    ) {
         let (focus_game_tx, focus_game_rx) = async_channel::unbounded();
+        let (shortcut_config_tx, shortcut_config_rx) = async_channel::unbounded();
         (
             Self {
                 clients: Mutex::new(HashMap::new()),
                 last_active: Mutex::new(None),
                 next_id: AtomicU64::new(1),
                 focus_game_tx,
+                shortcut_config_tx,
             },
             focus_game_rx,
+            shortcut_config_rx,
         )
     }
 
     fn add_client(&self, ws: tungstenite::WebSocket<TcpStream>) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.clients.lock().unwrap().insert(
-            id,
-            Arc::new(Client {
-                ws: Mutex::new(ws),
-            }),
-        );
+        self.clients
+            .lock()
+            .unwrap()
+            .insert(id, Arc::new(Client { ws: Mutex::new(ws) }));
         *self.last_active.lock().unwrap() = Some(id);
         id
     }
@@ -121,6 +132,10 @@ impl EventBus {
     fn request_focus_game(&self) {
         let _ = self.focus_game_tx.try_send(());
     }
+
+    fn request_shortcut_update(&self, actions: Vec<ShortcutAction>) {
+        let _ = self.shortcut_config_tx.try_send(actions);
+    }
 }
 
 pub struct Server {
@@ -128,18 +143,20 @@ pub struct Server {
     pub config: Arc<ConfigStore>,
     pub logger: Arc<Logger>,
     pub focus_game_rx: async_channel::Receiver<()>,
+    pub shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
 }
 
 pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
-    let (event_bus, focus_game_rx) = EventBus::new();
+    let (event_bus, focus_game_rx, shortcut_config_rx) = EventBus::new();
     let server = Server {
         events: Arc::new(event_bus),
         config: Arc::new(ConfigStore::new()),
         logger: Arc::new(Logger::new()),
         focus_game_rx,
+        shortcut_config_rx,
     };
     let events = server.events.clone();
     let config = server.config.clone();
@@ -174,10 +191,7 @@ fn handle_connection(
 ) -> std::io::Result<()> {
     let mut peek_buf = [0u8; 1024];
     let n = stream.peek(&mut peek_buf)?;
-    let first_line_end = peek_buf[..n]
-        .iter()
-        .position(|&b| b == b'\r')
-        .unwrap_or(n);
+    let first_line_end = peek_buf[..n].iter().position(|&b| b == b'\r').unwrap_or(n);
     let first_line = &peek_buf[..first_line_end];
 
     if first_line.starts_with(b"GET /events") {
@@ -247,7 +261,12 @@ fn handle_websocket(
     Ok(())
 }
 
-fn handle_client_event(text: &str, from: ClientId, events: &Arc<EventBus>, config: &Arc<ConfigStore>) {
+fn handle_client_event(
+    text: &str,
+    from: ClientId,
+    events: &Arc<EventBus>,
+    config: &Arc<ConfigStore>,
+) {
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         eprintln!("[server] malformed client event: {text}");
         return;
@@ -264,8 +283,16 @@ fn handle_client_event(text: &str, from: ClientId, events: &Arc<EventBus>, confi
         "OVERLAY->MAIN::focus-game" => {
             events.request_focus_game();
         }
+        "CLIENT->MAIN::update-host-config" => {
+            let actions = crate::host_config::parse_shortcuts(&payload);
+            println!("[server] update-host-config received, {} shortcut(s) after filtering", actions.len());
+            events.request_shortcut_update(actions);
+        }
         "CLIENT->MAIN::save-config" => {
-            let contents = payload.get("contents").and_then(Value::as_str).unwrap_or("");
+            let contents = payload
+                .get("contents")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let is_temporary = payload
                 .get("isTemporary")
                 .and_then(Value::as_bool)
