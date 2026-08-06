@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::logger::Logger;
 
 // The renderer treats this as an opaque string blob (its whole serialized
 // settings state) — we don't parse it, just persist and echo it back,
@@ -24,7 +26,7 @@ impl ConfigStore {
         std::fs::read_to_string(&*self.path.lock().unwrap()).ok()
     }
 
-    pub fn save(&self, contents: &str, is_temporary: bool) {
+    pub fn save(&self, contents: &str, is_temporary: bool, logger: &Arc<Logger>) {
         let mut path = self.path.lock().unwrap();
         if is_temporary && path.extension().and_then(|e| e.to_str()) != Some("tmp") {
             let mut with_tmp = path.clone().into_os_string();
@@ -35,7 +37,9 @@ impl ConfigStore {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(err) = std::fs::write(&*path, contents) {
-            eprintln!("[config_store] failed to save config: {err}");
+            let msg = format!("[config_store] failed to save config: {err}");
+            eprintln!("{msg}");
+            logger.write(&msg);
         }
     }
 }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::net::TcpStream;
+use std::sync::Arc;
 
+use crate::logger::Logger;
 use crate::server::{write_response, write_response_with_headers};
 
 // Same allowlist as main/src/proxy.ts — this is how the renderer reaches
@@ -32,6 +34,7 @@ pub fn handle(
     path: &str,
     headers: &HashMap<String, String>,
     body: &[u8],
+    logger: &Arc<Logger>,
 ) -> std::io::Result<()> {
     let rest = path.strip_prefix("/proxy/").unwrap_or("");
     let host = rest.split('/').next().unwrap_or("");
@@ -95,7 +98,9 @@ pub fn handle(
             write_response_with_headers(stream, status, &content_type, &rate_limit_headers, &bytes)
         }
         Err(err) => {
-            eprintln!("[proxy] request to {host} failed: {err}");
+            let msg = format!("[proxy] request to {host} failed: {err}");
+            eprintln!("{msg}");
+            logger.write(&msg);
             write_response(stream, 502, "text/plain", b"proxy error")
         }
     }

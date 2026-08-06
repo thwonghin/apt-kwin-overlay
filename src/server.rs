@@ -50,7 +50,7 @@ pub struct EventBus {
 }
 
 impl EventBus {
-    fn new() -> (
+    pub(crate) fn new() -> (
         Self,
         async_channel::Receiver<()>,
         async_channel::Receiver<Vec<ShortcutAction>>,
@@ -151,14 +151,14 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
     let port = listener.local_addr()?.port();
 
     let (event_bus, focus_game_rx, shortcut_config_rx) = EventBus::new();
+    let events = Arc::new(event_bus);
     let server = Server {
-        events: Arc::new(event_bus),
+        events: events.clone(),
         config: Arc::new(ConfigStore::new()),
-        logger: Arc::new(Logger::new()),
+        logger: Arc::new(Logger::new(events.clone())),
         focus_game_rx,
         shortcut_config_rx,
     };
-    let events = server.events.clone();
     let config = server.config.clone();
     let logger = server.logger.clone();
 
@@ -198,7 +198,7 @@ fn handle_connection(
         return handle_websocket(stream, events, config, logger);
     }
 
-    handle_http(stream, config)
+    handle_http(stream, config, logger)
 }
 
 fn handle_websocket(
@@ -243,7 +243,7 @@ fn handle_websocket(
 
         match msg {
             Ok(tungstenite::Message::Text(text)) => {
-                handle_client_event(&text, id, events, config);
+                handle_client_event(&text, id, events, config, logger);
             }
             Ok(tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
@@ -266,6 +266,7 @@ fn handle_client_event(
     from: ClientId,
     events: &Arc<EventBus>,
     config: &Arc<ConfigStore>,
+    logger: &Arc<Logger>,
 ) {
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         eprintln!("[server] malformed client event: {text}");
@@ -284,7 +285,7 @@ fn handle_client_event(
             events.request_focus_game();
         }
         "CLIENT->MAIN::update-host-config" => {
-            let actions = crate::host_config::parse_shortcuts(&payload);
+            let actions = crate::host_config::parse_shortcuts(&payload, logger);
             println!("[server] update-host-config received, {} shortcut(s) after filtering", actions.len());
             events.request_shortcut_update(actions);
         }
@@ -297,7 +298,7 @@ fn handle_client_event(
                 .get("isTemporary")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            config.save(contents, is_temporary);
+            config.save(contents, is_temporary, logger);
             events.broadcast(
                 "MAIN->CLIENT::config-changed",
                 json!({ "contents": contents }),
@@ -307,7 +308,11 @@ fn handle_client_event(
     }
 }
 
-fn handle_http(stream: TcpStream, config: &Arc<ConfigStore>) -> std::io::Result<()> {
+fn handle_http(
+    stream: TcpStream,
+    config: &Arc<ConfigStore>,
+    logger: &Arc<Logger>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -356,7 +361,7 @@ fn handle_http(stream: TcpStream, config: &Arc<ConfigStore>) -> std::io::Result<
     }
 
     if path.starts_with("/proxy/") {
-        return crate::proxy::handle(&mut stream, &method, &path, &headers, &body);
+        return crate::proxy::handle(&mut stream, &method, &path, &headers, &body, logger);
     }
 
     serve_static(&mut stream, &path)

@@ -318,6 +318,7 @@ fn build_ui(app: &Application) {
         let kwin_connection = kwin_connection.clone();
         let remote_input = remote_input.clone();
         let events = backend.events.clone();
+        let logger = backend.logger.clone();
         let active_window = active_window.clone();
         let focus_game_rx = backend.focus_game_rx.clone();
         let shortcut_config_rx = backend.shortcut_config_rx.clone();
@@ -329,15 +330,21 @@ fn build_ui(app: &Application) {
             // errors if this is called twice, so it happens exactly once here
             // rather than inside shortcuts.rs or remote_input.rs.
             if let Err(err) = ashpd::register_host_app(APP_ID.try_into().unwrap()).await {
-                eprintln!("[main] failed to register host app: {err}");
+                let msg = format!("[main] failed to register host app: {err}");
+                eprintln!("{msg}");
+                logger.write(&msg);
                 return;
             }
 
-            match remote_input::RemoteInput::setup().await {
+            match remote_input::RemoteInput::setup(logger.clone()).await {
                 Ok(ri) => {
                     remote_input.replace(Some(ri));
                 }
-                Err(err) => eprintln!("[main] remote_input setup failed: {err}"),
+                Err(err) => {
+                    let msg = format!("[main] remote_input setup failed: {err}");
+                    eprintln!("{msg}");
+                    logger.write(&msg);
+                }
             }
 
             shortcuts::spawn(
@@ -346,6 +353,7 @@ fn build_ui(app: &Application) {
                 kwin_connection,
                 remote_input,
                 events,
+                logger,
                 active_window,
                 focus_game_rx,
                 shortcut_config_rx,

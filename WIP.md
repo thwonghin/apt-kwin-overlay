@@ -163,18 +163,31 @@ description" keybind. Deferred originally, and confirmed here: as of PoE
 parameter is overwritten unconditionally). This file is close to dead code
 in the real app too now — not worth porting.
 
-## 9. In-app Logger is underused — Settings → Log tab is mostly empty for us
+## 9. In-app Logger is underused — Settings → Log tab is mostly empty for us — DONE
 
-Real APT routes almost all diagnostic/error messages (failed shortcut binds,
-missing config files, clipboard timeouts, etc.) through `Logger.write(...)`,
-which broadcasts `MAIN->CLIENT::log-entry` and shows up in the renderer's own
-Log view. Our code almost exclusively uses `println!`/`eprintln!` to our own
-terminal instead of `backend.logger` — the in-app log view (real, unmodified
-UI) works (we do wire history-replay-on-connect), it's just nearly always
-empty because we don't feed it. Cheap, mechanical fix whenever it's
-annoying enough to bother with: swap the more user-relevant `println!`s
-(price-check failures, shortcut bind failures, clipboard errors) to also
-call `logger.write(...)`.
+Wired `logger.write(...)` alongside the existing `eprintln!`/`println!` at
+every genuine-failure site the original audit called out: price-check's
+cursor-query/kwin-not-ready/remote-input-not-ready/clipboard-read failures
+and the shortcut-reapply failure (`shortcuts.rs`), reserved-hotkey-skip and
+bad-payload parsing (`host_config.rs`), config save failure
+(`config_store.rs`), proxy/GGG request failure (`proxy.rs`), the
+keyboard-device-not-ready warning (`remote_input.rs`), and host-app-
+registration/remote-input-setup failures (`main.rs`). Pure debug/lifecycle
+noise (connection open/close, raw EIS event dumps, per-frame geometry logs)
+was deliberately left as terminal-only — feeding those into the renderer's
+Log view would just be spam.
+
+Found `Logger::write` was actually dead code (`#[allow(dead_code)]`, never
+called) and, separately, that it only ever fed the history buffer replayed
+to a client on connect — nothing broadcast a log entry live to clients
+already connected. Fixed both: `Logger` now holds an `Arc<EventBus>` (built
+before `Logger` in `server::spawn()` so it can be handed in) and `write()`
+broadcasts `MAIN->CLIENT::log-entry` immediately, in addition to appending
+to history. `Arc<Logger>` is threaded alongside the existing `Arc<EventBus>`
+param through the same call chains §1's shortcut/config plumbing already
+established, rather than being stored as a field everywhere (`ConfigStore`,
+`proxy::handle` take it as a plain parameter; `RemoteInput` stores it since
+`press_keys` has no other way to reach it from `&self`).
 
 ## 10. PoE losing OS focus doesn't reset our overlay state
 
@@ -241,7 +254,8 @@ open the browser UI instead, or drop the item.
 
 ## Suggested order if picked back up
 
-1. §9 (logger wiring) — trivial, immediately useful for debugging future issues.
+1. ~~§9 (logger wiring)~~ — done, and turned up two extra fixes along the
+   way (dead-code `write()`, no live broadcast — see §9).
 2. §3 (clipboard retry/validation) — small, fixes a real reliability gap in
    the one feature that matters most (price-check).
 3. §10 (PoE-focus-loss resets state) — small, matches an actual UX

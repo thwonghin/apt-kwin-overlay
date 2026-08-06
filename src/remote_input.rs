@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ashpd::desktop::clipboard::{Clipboard, RequestClipboardOptions};
 use ashpd::desktop::remote_desktop::{ConnectToEISOptions, DeviceType, RemoteDesktop};
@@ -10,6 +11,8 @@ use futures_util::{AsyncReadExt, StreamExt};
 use reis::enumflags2::BitFlags as EiBitFlags;
 use reis::event::{DeviceCapability, EiEvent};
 use reis::{ei, event};
+
+use crate::logger::Logger;
 
 // Raw Linux evdev keycodes (linux/input-event-codes.h). notify_keyboard_keycode
 // (the plain RemoteDesktop D-Bus path) turned out to have zero real-world
@@ -52,10 +55,11 @@ pub struct RemoteInput {
     // raw EIS socket (`context`) is a separate connection.
     #[allow(dead_code)]
     session: Session<RemoteDesktop>,
+    logger: Arc<Logger>,
 }
 
 impl RemoteInput {
-    pub async fn setup() -> ashpd::Result<Self> {
+    pub async fn setup(logger: Arc<Logger>) -> ashpd::Result<Self> {
         let proxy = RemoteDesktop::new().await?;
         let session = proxy.create_session(CreateSessionOptions::default()).await?;
 
@@ -153,6 +157,7 @@ impl RemoteInput {
             start: std::time::Instant::now(),
             clipboard,
             session,
+            logger,
         })
     }
 
@@ -187,7 +192,9 @@ impl RemoteInput {
     fn press_keys(&self, keys: &[(u32, ei::keyboard::KeyState)]) {
         let handle = self.keyboard.borrow();
         let Some(handle) = handle.as_ref() else {
-            eprintln!("[remote_input] keyboard device not ready yet");
+            let msg = "[remote_input] keyboard device not ready yet";
+            eprintln!("{msg}");
+            self.logger.write(msg);
             return;
         };
 

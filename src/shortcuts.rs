@@ -15,6 +15,7 @@ use crate::host_config::{
     ActionKind, ShortcutAction, default_actions, extra_registerable_actions, shortcut_id,
 };
 use crate::kwin_tracker::WindowEvent;
+use crate::logger::Logger;
 use crate::remote_input::RemoteInput;
 use crate::server::EventBus;
 use crate::{set_click_through, toggle_click_through};
@@ -25,6 +26,7 @@ pub fn spawn(
     kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
+    logger: Arc<Logger>,
     active_window: Rc<RefCell<Option<WindowEvent>>>,
     focus_game_rx: async_channel::Receiver<()>,
     shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
@@ -62,6 +64,7 @@ pub fn spawn(
             &kwin_connection,
             &remote_input,
             &events,
+            &logger,
             &price_check_open,
             &price_check_locked,
             &active_window,
@@ -194,6 +197,7 @@ async fn run(
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
+    logger: &Arc<Logger>,
     price_check_open: &Rc<Cell<bool>>,
     price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
@@ -243,6 +247,7 @@ async fn run(
     {
         let all_shortcuts = all_shortcuts.clone();
         let dispatch = dispatch.clone();
+        let logger = logger.clone();
         glib::spawn_future_local(async move {
             while let Ok(actions) = shortcut_config_rx.recv().await {
                 if let Err(err) = apply_shortcuts(
@@ -255,7 +260,9 @@ async fn run(
                 )
                 .await
                 {
-                    eprintln!("[shortcuts] failed to apply updated shortcuts: {err}");
+                    let msg = format!("[shortcuts] failed to apply updated shortcuts: {err}");
+                    eprintln!("{msg}");
+                    logger.write(&msg);
                 }
             }
         });
@@ -289,6 +296,7 @@ async fn run(
                     kwin_connection,
                     remote_input,
                     events,
+                    logger,
                     price_check_open,
                     price_check_locked,
                     active_window,
@@ -316,6 +324,7 @@ async fn price_check(
     kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
     remote_input: &Rc<RefCell<Option<RemoteInput>>>,
     events: &Arc<EventBus>,
+    logger: &Arc<Logger>,
     price_check_open: &Rc<Cell<bool>>,
     price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
@@ -364,12 +373,16 @@ async fn price_check(
             Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
                 Ok(pos) => Some(pos),
                 Err(err) => {
-                    eprintln!("[shortcuts] price-check cursor query failed: {err}");
+                    let msg = format!("[shortcuts] price-check cursor query failed: {err}");
+                    eprintln!("{msg}");
+                    logger.write(&msg);
                     None
                 }
             },
             None => {
-                eprintln!("[shortcuts] price-check: kwin connection not ready yet");
+                let msg = "[shortcuts] price-check: kwin connection not ready yet";
+                eprintln!("{msg}");
+                logger.write(msg);
                 None
             }
         }
@@ -378,7 +391,9 @@ async fn price_check(
 
     let remote_ref = remote_input.borrow();
     let Some(remote) = remote_ref.as_ref() else {
-        eprintln!("[shortcuts] price-check: remote input not ready yet");
+        let msg = "[shortcuts] price-check: remote input not ready yet";
+        eprintln!("{msg}");
+        logger.write(msg);
         return;
     };
 
@@ -400,7 +415,9 @@ async fn price_check(
             return;
         }
         Err(err) => {
-            eprintln!("[shortcuts] price-check clipboard read failed: {err}");
+            let msg = format!("[shortcuts] price-check clipboard read failed: {err}");
+            eprintln!("{msg}");
+            logger.write(&msg);
             return;
         }
     };

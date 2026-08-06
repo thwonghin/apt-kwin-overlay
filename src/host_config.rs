@@ -6,8 +6,11 @@
 // blob the renderer sends on CLIENT->MAIN::update-host-config.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde::Deserialize;
+
+use crate::logger::Logger;
 
 #[derive(Debug, Clone, Deserialize)]
 struct HostConfig {
@@ -58,16 +61,18 @@ const RESERVED: &[&str] = &[
     "ArrowLeft",
 ];
 
-fn filter_valid(actions: Vec<ShortcutAction>) -> Vec<ShortcutAction> {
+fn filter_valid(actions: Vec<ShortcutAction>, logger: &Arc<Logger>) -> Vec<ShortcutAction> {
     let mut seen = HashSet::new();
     actions
         .into_iter()
         .filter(|a| {
             if RESERVED.contains(&a.shortcut.as_str()) {
-                eprintln!(
+                let msg = format!(
                     "[host_config] hotkey \"{}\" is reserved by the game, skipping",
                     a.shortcut
                 );
+                eprintln!("{msg}");
+                logger.write(&msg);
                 return false;
             }
             true
@@ -166,14 +171,16 @@ pub fn to_portal_trigger(shortcut: &str) -> String {
         .join("+")
 }
 
-pub fn parse_shortcuts(payload: &serde_json::Value) -> Vec<ShortcutAction> {
+pub fn parse_shortcuts(payload: &serde_json::Value, logger: &Arc<Logger>) -> Vec<ShortcutAction> {
     let actions = serde_json::from_value::<HostConfig>(payload.clone())
         .map(|c| c.shortcuts)
         .unwrap_or_else(|err| {
-            eprintln!("[host_config] bad update-host-config payload: {err}");
+            let msg = format!("[host_config] bad update-host-config payload: {err}");
+            eprintln!("{msg}");
+            logger.write(&msg);
             Vec::new()
         });
-    filter_valid(actions)
+    filter_valid(actions, logger)
 }
 
 /// The 3 hotkeys we've always bound, expressed as ShortcutActions so they
@@ -271,6 +278,10 @@ pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn test_logger() -> Arc<Logger> {
+        Arc::new(Logger::new(Arc::new(crate::server::EventBus::new().0)))
+    }
+
     #[test]
     fn to_portal_trigger_matches_known_working_defaults() {
         // These 3 exact strings are confirmed live (against a real KDE
@@ -330,7 +341,7 @@ mod tests {
             "language": "en",
         });
 
-        let actions = parse_shortcuts(&payload);
+        let actions = parse_shortcuts(&payload, &test_logger());
         assert_eq!(actions.len(), 3);
         assert!(matches!(
             actions[0].action,
@@ -374,7 +385,7 @@ mod tests {
             },
         ];
 
-        let filtered = filter_valid(actions);
+        let filtered = filter_valid(actions, &test_logger());
         // Ctrl+C dropped (reserved); second Ctrl+D dropped (duplicate
         // shortcut string); both Shift+Space entries kept (toggle-overlay
         // is exempt from the dedup drop).
