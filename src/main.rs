@@ -260,6 +260,12 @@ fn build_ui(app: &Application) {
     // from the moment the app starts, before the deferred idle callback
     // below has had a chance to run.
     let click_through = Rc::new(Cell::new(true));
+    // Host-side price-check popup bookkeeping, hoisted out of
+    // shortcuts::spawn (which used to own them locally) so the
+    // kwin_tracker::Activated handler below can also reset them via
+    // shortcuts::close_all_ui when PoE regains focus.
+    let price_check_open = Rc::new(Cell::new(false));
+    let price_check_locked = Rc::new(Cell::new(false));
 
     window.set_child(Some(&webview));
 
@@ -289,6 +295,9 @@ fn build_ui(app: &Application) {
         let active_window = active_window.clone();
         let window = window.clone();
         let click_through_for_monitor = click_through.clone();
+        let events_for_tracker = backend.events.clone();
+        let price_check_open_for_tracker = price_check_open.clone();
+        let price_check_locked_for_tracker = price_check_locked.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -303,6 +312,20 @@ fn build_ui(app: &Application) {
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
                             move_overlay_to_window_monitor(&window, &w, &click_through_for_monitor);
+                            // Mirrors real APT's handlePoeWindowActiveChange:
+                            // PoE *regaining* focus forces any
+                            // locked/interactive overlay state back to
+                            // click-through, the same path the renderer's
+                            // own title-bar close button already uses.
+                            if !click_through_for_monitor.get() {
+                                shortcuts::close_all_ui(
+                                    &window,
+                                    &click_through_for_monitor,
+                                    &events_for_tracker,
+                                    &price_check_open_for_tracker,
+                                    &price_check_locked_for_tracker,
+                                );
+                            }
                         }
                         active_window.replace(Some(w));
                     }
@@ -340,6 +363,8 @@ fn build_ui(app: &Application) {
         let active_window = active_window.clone();
         let focus_game_rx = backend.focus_game_rx.clone();
         let shortcut_config_rx = backend.shortcut_config_rx.clone();
+        let price_check_open = price_check_open.clone();
+        let price_check_locked = price_check_locked.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -375,6 +400,8 @@ fn build_ui(app: &Application) {
                 active_window,
                 focus_game_rx,
                 shortcut_config_rx,
+                price_check_open,
+                price_check_locked,
             );
         });
     }

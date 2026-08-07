@@ -30,10 +30,9 @@ pub fn spawn(
     active_window: Rc<RefCell<Option<WindowEvent>>>,
     focus_game_rx: async_channel::Receiver<()>,
     shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
+    price_check_open: Rc<Cell<bool>>,
+    price_check_locked: Rc<Cell<bool>>,
 ) {
-    let price_check_open = Rc::new(Cell::new(false));
-    let price_check_locked = Rc::new(Cell::new(false));
-
     {
         let window = window.clone();
         let click_through = click_through.clone();
@@ -80,7 +79,7 @@ pub fn spawn(
 /// Force click-through back on and close any open overlay widgets, as an
 /// always-available safety hatch regardless of what's currently showing.
 /// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
-fn close_all_ui(
+pub(crate) fn close_all_ui(
     window: &ApplicationWindow,
     click_through: &Rc<Cell<bool>>,
     events: &Arc<EventBus>,

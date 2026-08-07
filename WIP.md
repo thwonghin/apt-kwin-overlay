@@ -255,7 +255,7 @@ the raw message with no timestamp at all. Cosmetic (the Log tab just loses
 per-entry timestamps), one-line fix if picked up — format the timestamp
 prefix in `Logger::write` before touching history/broadcast.
 
-## 10. PoE *regaining* OS focus doesn't reset our overlay state — correcting a prior misreading
+## 10. PoE *regaining* OS focus doesn't reset our overlay state — DONE
 
 Previous passes described this as "PoE losing focus doesn't reset state."
 Reading `OverlayWindow.ts::handlePoeWindowActiveChange` directly this pass
@@ -292,6 +292,19 @@ click-through is currently off, force it back on and broadcast
 `MAIN->OVERLAY::focus-change`" to that same arm — reusing
 `set_click_through`/`shortcuts::close_all_ui`'s existing logic — replicates
 real APT's actual behavior without needing any new event source.
+
+Implemented: `main.rs`'s `TrackerEvent::Activated` arm now calls
+`shortcuts::close_all_ui` whenever `w.is_path_of_exile()` and click-through
+is currently off. `price_check_open`/`price_check_locked` (previously
+locals created inside `shortcuts::spawn`) were hoisted up to `build_ui` and
+threaded into `shortcuts::spawn` as parameters so the tracker-event handler
+can share them and call `close_all_ui` directly — this resets click-through
+*and* the price-check popup's open/locked bookkeeping together, not just
+click-through, which matters because a stale `price_check_open` would make
+the next price-check hotkey press try to *close* an already-hidden popup
+instead of opening a fresh one. `close_all_ui` is now `pub(crate)` (was
+module-private). No new event source or channel needed — both call sites
+already run on the same GTK main-loop thread.
 
 ## 11. No tray icon (`AppTray.ts`)
 
@@ -401,11 +414,9 @@ scratch later.
 1. ~~§9 (logger wiring)~~ — done, and turned up two extra fixes along the
    way (dead-code `write()`, no live broadcast — see §9). One loose end
    left (missing timestamp prefix), trivial if ever picked up.
-2. §10 (PoE-focus-regain resets state) — re-scoped this pass: turns out to
-   be a small addition to `main.rs`'s existing `TrackerEvent::Activated`
-   handler, not a new event source. Moved up given how cheap it now looks
-   relative to its UX payoff (Alt-tab back into the game should always hand
-   control back, not leave a stale locked popup interactive).
+2. ~~§10 (PoE-focus-regain resets state)~~ — done, landed as scoped: a small
+   addition to `main.rs`'s existing `TrackerEvent::Activated` handler
+   calling `shortcuts::close_all_ui`, no new event source.
 3. §3 (clipboard retry/validation) — small, fixes a real reliability gap in
    the one feature that matters most (price-check).
 4. §6 (local Escape via focus, not global grab) — medium, unblocked since
