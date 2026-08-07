@@ -1,9 +1,10 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
-// the user's configured hotkey list. Everything else in that payload
-// (restoreClipboard/clientLog/gameConfig/stashScroll/overlayKey/logKeys/
-// windowTitle/language) is intentionally not modeled here — serde ignores
-// unknown fields by default, so this just picks `shortcuts` out of the full
-// blob the renderer sends on CLIENT->MAIN::update-host-config.
+// the user's configured hotkey list and the restoreClipboard flag.
+// Everything else in that payload (clientLog/gameConfig/stashScroll/
+// overlayKey/logKeys/windowTitle/language) is intentionally not modeled
+// here — serde ignores unknown fields by default, so this just picks what
+// we use out of the full blob the renderer sends on
+// CLIENT->MAIN::update-host-config.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,10 +13,12 @@ use serde::Deserialize;
 
 use crate::logger::Logger;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct HostConfig {
     #[serde(default)]
     shortcuts: Vec<ShortcutAction>,
+    #[serde(default, rename = "restoreClipboard")]
+    restore_clipboard: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,16 +174,22 @@ pub fn to_portal_trigger(shortcut: &str) -> String {
         .join("+")
 }
 
-pub fn parse_shortcuts(payload: &serde_json::Value, logger: &Arc<Logger>) -> Vec<ShortcutAction> {
-    let actions = serde_json::from_value::<HostConfig>(payload.clone())
-        .map(|c| c.shortcuts)
-        .unwrap_or_else(|err| {
-            let msg = format!("[host_config] bad update-host-config payload: {err}");
-            eprintln!("{msg}");
-            logger.write(&msg);
-            Vec::new()
-        });
-    filter_valid(actions, logger)
+pub struct ParsedHostConfig {
+    pub shortcuts: Vec<ShortcutAction>,
+    pub restore_clipboard: bool,
+}
+
+pub fn parse_host_config(payload: &serde_json::Value, logger: &Arc<Logger>) -> ParsedHostConfig {
+    let parsed = serde_json::from_value::<HostConfig>(payload.clone()).unwrap_or_else(|err| {
+        let msg = format!("[host_config] bad update-host-config payload: {err}");
+        eprintln!("{msg}");
+        logger.write(&msg);
+        HostConfig::default()
+    });
+    ParsedHostConfig {
+        shortcuts: filter_valid(parsed.shortcuts, logger),
+        restore_clipboard: parsed.restore_clipboard,
+    }
 }
 
 /// The 3 hotkeys we've always bound, expressed as ShortcutActions so they
@@ -341,14 +350,21 @@ mod tests {
             "language": "en",
         });
 
-        let actions = parse_shortcuts(&payload, &test_logger());
-        assert_eq!(actions.len(), 3);
+        let parsed = parse_host_config(&payload, &test_logger());
+        assert_eq!(parsed.shortcuts.len(), 3);
         assert!(matches!(
-            actions[0].action,
+            parsed.shortcuts[0].action,
             ActionKind::CopyItem { ref target, focus_overlay: false } if target == "price-check"
         ));
-        assert!(matches!(actions[1].action, ActionKind::ToggleOverlay));
-        assert!(matches!(actions[2].action, ActionKind::Unsupported));
+        assert!(matches!(parsed.shortcuts[1].action, ActionKind::ToggleOverlay));
+        assert!(matches!(parsed.shortcuts[2].action, ActionKind::Unsupported));
+        assert!(parsed.restore_clipboard);
+    }
+
+    #[test]
+    fn restore_clipboard_defaults_to_false_when_omitted() {
+        let payload = serde_json::json!({ "shortcuts": [] });
+        assert!(!parse_host_config(&payload, &test_logger()).restore_clipboard);
     }
 
     #[test]

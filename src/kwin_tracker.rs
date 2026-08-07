@@ -36,6 +36,20 @@ impl WindowEvent {
         let caption = self.caption.trim().to_ascii_lowercase();
         class.contains("pathofexile") || caption == "path of exile" || caption == "path of exile 2"
     }
+
+    /// True when this activation event is our own overlay surface, not some
+    /// other real app. Confirmed live: KDE's KeyboardMode::OnDemand grants
+    /// our layer-shell surface a genuine window-activation event the moment
+    /// it becomes interactive (click-through off, e.g. opening a locked
+    /// price-check popup) -- not only on an explicit click. Callers that
+    /// track "what's the last externally-focused app" (main.rs's
+    /// `active_window`, used by shortcuts.rs::price_check to avoid injecting
+    /// Ctrl+C into whatever app happens to be focused) must ignore these
+    /// self-activations, or a locked popup opening would immediately look
+    /// indistinguishable from "the user alt-tabbed away from the game."
+    pub fn is_own_process(&self) -> bool {
+        self.pid as u32 == std::process::id()
+    }
 }
 
 #[derive(Debug)]
@@ -259,4 +273,67 @@ pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f6
     let _ = std::fs::remove_file(&script_path);
 
     result
+}
+
+/// Explicitly re-activates the PoE window via KWin scripting. Needed because
+/// restoring click-through doesn't hand real OS focus back to the game on
+/// its own: the click a user makes to dismiss an interactive popup is
+/// consumed entirely by our own overlay surface (that's how the renderer
+/// knows to ask us to restore click-through in the first place), so it never
+/// reaches PoE the way a real click-through would. Confirmed live: without
+/// this, PoE stays unfocused after closing a popup until the user happens to
+/// click the game again separately -- our own injected Ctrl+C lands nowhere
+/// useful in the meantime, and WebKitGTK's own webview can end up claiming
+/// clipboard ownership instead.
+///
+/// Same disposable load/run/unload pattern as `query_cursor_pos`, but
+/// fire-and-forget (no callback/object-server registration needed since
+/// there's no return value to wait for).
+pub async fn activate_path_of_exile(connection: &zbus::Connection) -> zbus::Result<()> {
+    static ACTIVATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = ACTIVATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let plugin_name = format!("apt-kwin-overlay-activate-{id}");
+
+    // Mirrors WindowEvent::is_path_of_exile()'s matching -- keep in sync.
+    let script = r#"
+var candidates = workspace.windowList().filter(function (w) {
+    var className = (w.resourceClass || "").toLowerCase();
+    var caption = (w.caption || "").trim().toLowerCase();
+    return className.indexOf("pathofexile") !== -1 || caption === "path of exile" || caption === "path of exile 2";
+});
+if (candidates.length > 0) {
+    workspace.activeWindow = candidates[0];
+}
+"#;
+
+    let script_path = std::env::temp_dir().join(format!("{plugin_name}.js"));
+    std::fs::write(&script_path, script)?;
+
+    let scripting = zbus::Proxy::new(
+        connection,
+        "org.kde.KWin",
+        "/Scripting",
+        "org.kde.kwin.Scripting",
+    )
+    .await?;
+    let script_id: i32 = scripting
+        .call(
+            "loadScript",
+            &(script_path.to_string_lossy().to_string(), plugin_name.as_str()),
+        )
+        .await?;
+
+    let script_obj = zbus::Proxy::new(
+        connection,
+        "org.kde.KWin",
+        format!("/Scripting/Script{script_id}"),
+        "org.kde.kwin.Script",
+    )
+    .await?;
+    script_obj.call_method("run", &()).await?;
+
+    let _: bool = scripting.call("unloadScript", &(plugin_name.as_str(),)).await?;
+    let _ = std::fs::remove_file(&script_path);
+
+    Ok(())
 }

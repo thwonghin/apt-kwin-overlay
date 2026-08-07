@@ -93,29 +93,54 @@ We have no scroll-event capture at all (libei/EIS only ever *emits* input for
 us, doesn't capture the user's real mouse wheel), and no window-bounds-based
 region logic. Not attempted.
 
-## 3. Clipboard read is fragile compared to `HostClipboard.ts`
+## 3. Clipboard read is fragile compared to `HostClipboard.ts` — DONE
 
-Real `readItemText()`:
-- Polls every 48ms up to 500ms (we: fixed single 150ms wait, one read, no
-  retry — if PoE is slow to update the clipboard, we return empty and give up).
-- Validates the result actually looks like an item via a first-line check
-  against 10 language signatures before accepting it (we: accept whatever's
-  on the clipboard, no validation — a stale clipboard value would silently
-  "work").
-- Optional clipboard restore-after-copy (`restoreClipboard` setting) so
-  copying an item doesn't clobber whatever the user had copied before. We
-  don't implement the setting at all (always leaves the item text sitting in
-  the clipboard).
-- KDE-specific "prevent empty clipboard" and Proton 10+ workarounds (writes a
-  throwaway marker string before triggering the copy) — noted as *not*
-  directly applicable to us in the original phase plan since our capture path
-  is portal-based, not Electron clipboard; worth re-checking if stale reads
-  ever show up in testing.
+Implemented both halves. `remote_input.rs::read_clipboard_text` now takes a
+`restore: bool` and:
+- Polls every 48ms up to ~500ms (`CLIPBOARD_POLL_DELAY_MS`/
+  `CLIPBOARD_POLL_LIMIT_MS`), validating each read against the same 10
+  language-signature prefixes as real `HostClipboard.ts`'s
+  `LANGUAGE_DETECTOR` (`ITEM_TEXT_SIGNATURES`/`looks_like_item_text`) instead
+  of the old fixed single 150ms-wait/one-read/no-validation logic.
+  `shortcuts.rs::price_check` no longer has its own separate fixed wait
+  before calling it — the poll loop's own first-tick 48ms delay replaces it.
+- `restoreClipboard`: `host_config.rs`'s `HostConfig` now parses it
+  (`parse_shortcuts` → `parse_host_config`, returning both the shortcut list
+  and this flag), threaded through a third `EventBus` channel
+  (`restore_clipboard_tx`/`rx`, mirroring `focus_game_tx`) into
+  `shortcuts.rs::spawn`, held in an `Rc<Cell<bool>>`, and read fresh at each
+  `price_check` call.
 
-Real fix shape: port the poll-with-timeout + language-signature-validation
-loop into `remote_input.rs::read_clipboard_text`, add a `restoreClipboard`
-config flag — §1's config plumbing (`host_config.rs`) exists now, so this
-is unblocked; just needs its own pass.
+The write-back itself needed more than "call a clipboard-write function" —
+`ashpd`'s Clipboard portal has no such call. A `RemoteDesktop` session can
+only *claim ownership* of the selection (`SetSelection`) and then must
+answer `SelectionTransfer` D-Bus signals reactively via `SelectionWrite`/
+`SelectionWriteDone` whenever something tries to read the clipboard while we
+own it — so `RemoteInput::setup` now also spawns a second persistent
+listener task (own `Clipboard` handle, since `Session` isn't `Clone` but the
+transfer stream reconstructs its own `Session` per event anyway), mirroring
+the shape of the existing EIS event-loop task without sharing code with it.
+`RemoteInput` gained a `pending_clipboard_write: Rc<RefCell<Option<String>>>`
+field holding whatever we last claimed via `write_clipboard_text`, served to
+every transfer request until overwritten. Matches `HostClipboard.ts`'s own
+defensive handling of one race: if the clipboard content captured before
+polling already looks like item text itself (can't tell if that's stale
+leftover text or the fresh copy racing ahead of us), nothing is restored
+rather than risking restoring the wrong thing.
+
+Deliberately **not** ported: `HostClipboard.ts`'s KDE "prevent empty
+clipboard" / Proton 10+ marker-write workarounds — as before, no confirmed
+symptom on our portal-based capture path; still worth re-checking if stale
+reads ever show up in testing.
+
+**Verify live** (same category as this codebase's other portal-behavior
+assumptions confirmed empirically against a real KDE session, e.g. §1's
+trigger-string format, §10's `TrackerEvent::Activated` timing): whether
+`SetSelection` makes us the clipboard owner only until some other app's own
+copy naturally reclaims it, or whether it "sticks" until we call
+`SetSelection` again. Noted as a code comment on `write_clipboard_text`; if
+restoring the clipboard ever ends up shadowing the user's later copies,
+that's the mechanism to revisit.
 
 (Separately, `HostClipboard.ts` also has a `restoreShortly`/`RESTORE_AFTER`
 120ms throttle-and-restore path used only by `typeInChat`/`stashSearch` —
@@ -417,8 +442,10 @@ scratch later.
 2. ~~§10 (PoE-focus-regain resets state)~~ — done, landed as scoped: a small
    addition to `main.rs`'s existing `TrackerEvent::Activated` handler
    calling `shortcuts::close_all_ui`, no new event source.
-3. §3 (clipboard retry/validation) — small, fixes a real reliability gap in
-   the one feature that matters most (price-check).
+3. ~~§3 (clipboard retry/validation, restoreClipboard)~~ — done, both the
+   reliability fix and the restoreClipboard write-back (which turned out to
+   need a `SelectionTransfer` listener task, not just a "write" call — see
+   §3).
 4. §6 (local Escape via focus, not global grab) — medium, unblocked since
    commit `d749d98`, directly un-regresses a feature we had to rip out;
    worth binding the overlay toggle key locally too while in there (see §6).
@@ -431,8 +458,10 @@ scratch later.
    in KDE Global Shortcuts" rather than a literal port of `Shortcuts.ts`
    (see §1). paste-in-chat/stash-search turned out more tractable than
    originally scoped (see §1's re-audit) but still their own pass — needs
-   new evdev keycode constants, a generic multi-tap helper, and a clipboard-
-   write wrapper around `ashpd`'s already-present `Clipboard` portal.
+   new evdev keycode constants and a generic multi-tap helper; the
+   clipboard-write wrapper around `ashpd`'s `Clipboard` portal it also
+   needed now exists (`RemoteInput::write_clipboard_text`, built for §3's
+   restoreClipboard) and can be reused as-is.
 7. §4/§5 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
    view) — blocked on having a live modifier-key/cursor stream we don't
    currently have; needs its own spike to figure out whether KWin scripting

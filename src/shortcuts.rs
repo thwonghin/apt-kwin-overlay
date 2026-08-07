@@ -30,6 +30,7 @@ pub fn spawn(
     active_window: Rc<RefCell<Option<WindowEvent>>>,
     focus_game_rx: async_channel::Receiver<()>,
     shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
+    restore_clipboard_rx: async_channel::Receiver<bool>,
     price_check_open: Rc<Cell<bool>>,
     price_check_locked: Rc<Cell<bool>>,
 ) {
@@ -39,6 +40,7 @@ pub fn spawn(
         let events = events.clone();
         let price_check_open = price_check_open.clone();
         let price_check_locked = price_check_locked.clone();
+        let kwin_connection = kwin_connection.clone();
         glib::spawn_future_local(async move {
             // The renderer's own title-bar "x" button sends this instead of
             // just hiding itself locally (main/src/windowing/OverlayWindow.ts's
@@ -51,7 +53,19 @@ pub fn spawn(
                     &events,
                     &price_check_open,
                     &price_check_locked,
-                );
+                    &kwin_connection,
+                )
+                .await;
+            }
+        });
+    }
+
+    let restore_clipboard: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    {
+        let restore_clipboard = restore_clipboard.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(value) = restore_clipboard_rx.recv().await {
+                restore_clipboard.set(value);
             }
         });
     }
@@ -68,6 +82,7 @@ pub fn spawn(
             &price_check_locked,
             &active_window,
             shortcut_config_rx,
+            &restore_clipboard,
         )
         .await
         {
@@ -79,13 +94,20 @@ pub fn spawn(
 /// Force click-through back on and close any open overlay widgets, as an
 /// always-available safety hatch regardless of what's currently showing.
 /// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
-pub(crate) fn close_all_ui(
+pub(crate) async fn close_all_ui(
     window: &ApplicationWindow,
     click_through: &Rc<Cell<bool>>,
     events: &Arc<EventBus>,
     price_check_open: &Rc<Cell<bool>>,
     price_check_locked: &Rc<Cell<bool>>,
+    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
 ) {
+    println!(
+        "[shortcuts] close_all_ui called, price_check_open={}, price_check_locked={}, click_through was {}",
+        price_check_open.get(),
+        price_check_locked.get(),
+        click_through.get()
+    );
     if price_check_open.get() {
         events.broadcast(
             "MAIN->OVERLAY::hide-exclusive-widget",
@@ -95,6 +117,17 @@ pub(crate) fn close_all_ui(
     }
     price_check_locked.set(false);
     set_click_through(true, window, click_through, events);
+
+    // Restoring click-through doesn't hand real OS focus back to PoE on its
+    // own -- see activate_path_of_exile's doc comment for why. Best-effort:
+    // a failure here just means the user has to click the game once more
+    // themselves, not a reason to abort the rest of this cleanup.
+    let connection = kwin_connection.borrow().clone();
+    if let Some(connection) = connection {
+        if let Err(err) = crate::kwin_tracker::activate_path_of_exile(&connection).await {
+            eprintln!("[shortcuts] failed to re-activate Path of Exile: {err}");
+        }
+    }
 }
 
 /// Binds any actions not already bound this session and refreshes the
@@ -201,6 +234,7 @@ async fn run(
     price_check_locked: &Rc<Cell<bool>>,
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
     shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
+    restore_clipboard: &Rc<Cell<bool>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy
@@ -270,11 +304,17 @@ async fn run(
     while let Some(event) = activated.next().await {
         let now = std::time::Instant::now();
         if last_activation.is_some_and(|t| now.duration_since(t) < DEBOUNCE) {
+            println!("[shortcuts] Activated id={} dropped by debounce", event.shortcut_id());
             continue;
         }
         last_activation = Some(now);
 
         let Some(action) = dispatch.borrow().get(event.shortcut_id()).cloned() else {
+            println!(
+                "[shortcuts] Activated id={} has no dispatch entry ({} known)",
+                event.shortcut_id(),
+                dispatch.borrow().len()
+            );
             continue;
         };
         match action.action {
@@ -301,6 +341,7 @@ async fn run(
                     active_window,
                     &target,
                     focus_overlay,
+                    restore_clipboard,
                 )
                 .await
             }
@@ -329,6 +370,7 @@ async fn price_check(
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
     target: &str,
     focus_overlay: bool,
+    restore_clipboard: &Rc<Cell<bool>>,
 ) {
     println!(
         "[shortcuts] price_check called, target={target}, focus_overlay={focus_overlay}, price_check_open={}",
@@ -400,14 +442,15 @@ async fn price_check(
 
     // Injected keys go out over the EIS socket fire-and-forget — press_ctrl_c
     // returning just means the events were queued/flushed, not that the
-    // target app has processed Ctrl+C and updated its clipboard yet. Without
-    // this, the read below races ahead and returns stale content.
-    glib::timeout_future(std::time::Duration::from_millis(150)).await;
-
+    // target app has processed Ctrl+C and updated its clipboard yet.
+    // read_clipboard_text itself now polls (48ms steps, up to ~500ms) rather
+    // than assuming a single fixed wait is always enough, so there's no
+    // separate delay needed here before calling it.
+    //
     // gdk::Clipboard only reliably reflects content while our own window has
     // had keyboard focus (Wayland gates clipboard visibility by focus) — use
     // the portal's clipboard instead, which works regardless of local focus.
-    let clipboard = match remote.read_clipboard_text().await {
+    let clipboard = match remote.read_clipboard_text(restore_clipboard.get()).await {
         Ok(Some(text)) => text,
         Ok(None) => {
             println!("[shortcuts] price-check clipboard: empty");

@@ -47,6 +47,12 @@ pub struct EventBus {
     // shortcuts.rs task, which owns the ashpd GlobalShortcuts session that
     // needs to react to it. Same shape as focus_game_tx/rx above.
     shortcut_config_tx: async_channel::Sender<Vec<ShortcutAction>>,
+    // Carries the same update-host-config event's restoreClipboard flag,
+    // over to shortcuts.rs so price-check can pass it into
+    // RemoteInput::read_clipboard_text. Same shape as the two channels
+    // above, kept separate since it's consumed independently (doesn't touch
+    // apply_shortcuts's GlobalShortcuts bookkeeping).
+    restore_clipboard_tx: async_channel::Sender<bool>,
 }
 
 impl EventBus {
@@ -54,9 +60,11 @@ impl EventBus {
         Self,
         async_channel::Receiver<()>,
         async_channel::Receiver<Vec<ShortcutAction>>,
+        async_channel::Receiver<bool>,
     ) {
         let (focus_game_tx, focus_game_rx) = async_channel::unbounded();
         let (shortcut_config_tx, shortcut_config_rx) = async_channel::unbounded();
+        let (restore_clipboard_tx, restore_clipboard_rx) = async_channel::unbounded();
         (
             Self {
                 clients: Mutex::new(HashMap::new()),
@@ -64,9 +72,11 @@ impl EventBus {
                 next_id: AtomicU64::new(1),
                 focus_game_tx,
                 shortcut_config_tx,
+                restore_clipboard_tx,
             },
             focus_game_rx,
             shortcut_config_rx,
+            restore_clipboard_rx,
         )
     }
 
@@ -136,6 +146,10 @@ impl EventBus {
     fn request_shortcut_update(&self, actions: Vec<ShortcutAction>) {
         let _ = self.shortcut_config_tx.try_send(actions);
     }
+
+    fn request_restore_clipboard_update(&self, value: bool) {
+        let _ = self.restore_clipboard_tx.try_send(value);
+    }
 }
 
 pub struct Server {
@@ -144,13 +158,14 @@ pub struct Server {
     pub logger: Arc<Logger>,
     pub focus_game_rx: async_channel::Receiver<()>,
     pub shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
+    pub restore_clipboard_rx: async_channel::Receiver<bool>,
 }
 
 pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
-    let (event_bus, focus_game_rx, shortcut_config_rx) = EventBus::new();
+    let (event_bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx) = EventBus::new();
     let events = Arc::new(event_bus);
     let server = Server {
         events: events.clone(),
@@ -158,6 +173,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
         logger: Arc::new(Logger::new(events.clone())),
         focus_game_rx,
         shortcut_config_rx,
+        restore_clipboard_rx,
     };
     let config = server.config.clone();
     let logger = server.logger.clone();
@@ -285,9 +301,14 @@ fn handle_client_event(
             events.request_focus_game();
         }
         "CLIENT->MAIN::update-host-config" => {
-            let actions = crate::host_config::parse_shortcuts(&payload, logger);
-            println!("[server] update-host-config received, {} shortcut(s) after filtering", actions.len());
-            events.request_shortcut_update(actions);
+            let parsed = crate::host_config::parse_host_config(&payload, logger);
+            println!(
+                "[server] update-host-config received, {} shortcut(s) after filtering, restore_clipboard={}",
+                parsed.shortcuts.len(),
+                parsed.restore_clipboard
+            );
+            events.request_shortcut_update(parsed.shortcuts);
+            events.request_restore_clipboard_update(parsed.restore_clipboard);
         }
         "CLIENT->MAIN::save-config" => {
             let contents = payload

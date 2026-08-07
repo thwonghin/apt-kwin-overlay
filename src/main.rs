@@ -291,6 +291,17 @@ fn build_ui(app: &Application) {
     let active_window: Rc<RefCell<Option<kwin_tracker::WindowEvent>>> = Rc::new(RefCell::new(None));
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
     let conn_rx = kwin_tracker::spawn(sender);
+
+    let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
+    {
+        let kwin_connection = kwin_connection.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(connection) = conn_rx.recv().await {
+                kwin_connection.replace(Some(connection));
+            }
+        });
+    }
+
     {
         let active_window = active_window.clone();
         let window = window.clone();
@@ -298,10 +309,29 @@ fn build_ui(app: &Application) {
         let events_for_tracker = backend.events.clone();
         let price_check_open_for_tracker = price_check_open.clone();
         let price_check_locked_for_tracker = price_check_locked.clone();
+        let kwin_connection_for_tracker = kwin_connection.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
                     TrackerEvent::Activated(w) => {
+                        // Our own layer-shell surface gets a genuine
+                        // window-activation event the moment it becomes
+                        // keyboard-interactive (e.g. opening a locked
+                        // price-check popup flips KeyboardMode to OnDemand) —
+                        // confirmed live, this fires without the user even
+                        // clicking anything. Ignore it entirely: it isn't a
+                        // real "user switched to another app" event, and
+                        // letting it overwrite `active_window` was making
+                        // price_check's is_poe guard (below, via
+                        // shortcuts::price_check) wrongly reject every hotkey
+                        // press until PoE happened to get a fresh, real
+                        // activation of its own — e.g. right after opening a
+                        // locked popup and clicking the background to close
+                        // it, both Ctrl+D and Ctrl+Alt+D would silently do
+                        // nothing.
+                        if w.is_own_process() {
+                            continue;
+                        }
                         // Layer-shell surfaces with no explicit monitor set
                         // just go wherever the compositor's default output
                         // is — which isn't necessarily where the game
@@ -324,7 +354,9 @@ fn build_ui(app: &Application) {
                                     &events_for_tracker,
                                     &price_check_open_for_tracker,
                                     &price_check_locked_for_tracker,
-                                );
+                                    &kwin_connection_for_tracker,
+                                )
+                                .await;
                             }
                         }
                         active_window.replace(Some(w));
@@ -342,16 +374,6 @@ fn build_ui(app: &Application) {
         });
     }
 
-    let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
-    {
-        let kwin_connection = kwin_connection.clone();
-        glib::spawn_future_local(async move {
-            if let Ok(connection) = conn_rx.recv().await {
-                kwin_connection.replace(Some(connection));
-            }
-        });
-    }
-
     let remote_input: Rc<RefCell<Option<remote_input::RemoteInput>>> = Rc::new(RefCell::new(None));
     {
         let window = window.clone();
@@ -363,6 +385,7 @@ fn build_ui(app: &Application) {
         let active_window = active_window.clone();
         let focus_game_rx = backend.focus_game_rx.clone();
         let shortcut_config_rx = backend.shortcut_config_rx.clone();
+        let restore_clipboard_rx = backend.restore_clipboard_rx.clone();
         let price_check_open = price_check_open.clone();
         let price_check_locked = price_check_locked.clone();
         glib::spawn_future_local(async move {
@@ -400,6 +423,7 @@ fn build_ui(app: &Application) {
                 active_window,
                 focus_game_rx,
                 shortcut_config_rx,
+                restore_clipboard_rx,
                 price_check_open,
                 price_check_locked,
             );
