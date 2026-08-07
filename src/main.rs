@@ -236,6 +236,24 @@ fn build_ui(app: &Application) {
         // its default.
         settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     }
+    // The renderer opens external links (e.g. the price-check popup's
+    // "Trade" button, TradeLinks.vue) with plain `window.open(url)`. Real
+    // Electron intercepts that via `setWindowOpenHandler` and hands it to
+    // `shell.openExternal` (main/src/windowing/OverlayWindow.ts) instead of
+    // letting Electron create a popup window. WebKitGTK's equivalent hook is
+    // the "create" signal -- left unconnected, `window.open()` just does
+    // nothing observable. Mirror Electron: launch the user's default
+    // browser and return None so WebKit never creates an in-app popup.
+    webview.connect_create(|_view, navigation_action| {
+        if let Some(uri) = navigation_action.request().and_then(|req| req.uri())
+            && let Err(err) =
+                gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE)
+        {
+            eprintln!("[main] failed to open external link {uri}: {err}");
+        }
+        None
+    });
+
     webview.load_uri(&format!("http://127.0.0.1:{port}/"));
 
     // Starts true (not false-then-flipped): other logic reads this Cell
