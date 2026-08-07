@@ -388,27 +388,38 @@ impl RemoteInput {
     /// ahead of us, so nothing is restored (matches HostClipboard.ts's own
     /// defensive handling of the same race).
     ///
-    /// Deliberately not porting HostClipboard.ts's KDE "prevent empty
-    /// clipboard" / Proton 10+ workarounds (writing a throwaway marker
-    /// string instead of an empty write) -- those exist for Electron's
-    /// clipboard API specifically and have no confirmed symptom on this
-    /// portal-based path; revisit only if stale/empty reads actually show up
-    /// in testing.
+    /// Ported from HostClipboard.ts's readItemText(): clipboard content is
+    /// cleared *before* polling starts, unconditionally (not gated on
+    /// `restore` -- only the write-back afterward is). Without this,
+    /// content left over from a previous price-check (or anything else)
+    /// that already happens to look like valid item text gets accepted
+    /// immediately on the poll loop's very first tick if the game hasn't
+    /// updated the clipboard yet by then, silently showing stale data for
+    /// whatever's actually under the cursor now -- confirmed live, this is
+    /// exactly what was happening. Not porting the KDE "prevent empty
+    /// clipboard" workaround's throwaway-marker detail (writing
+    /// `__APT_FORCE_EMPTY_<timestamp>` instead of a plain empty string) --
+    /// that's specifically about Electron's clipboard API being vetoed by
+    /// Klipper; revisit only if writing an empty string here turns out not
+    /// to actually clear it in testing.
     pub async fn read_clipboard_text(&self, restore: bool) -> ashpd::Result<Option<String>> {
-        let before = if restore {
-            match self.read_clipboard_if_offered().await {
-                Ok(Some(text)) if !looks_like_item_text(&text) => Some(text),
-                Ok(_) => None,
-                Err(err) => {
-                    let msg = format!("[remote_input] clipboard pre-read (for restore) failed: {err}");
-                    eprintln!("{msg}");
-                    self.logger.write(&msg);
-                    None
-                }
+        let previous = match self.read_clipboard_if_offered().await {
+            Ok(text) => text,
+            Err(err) => {
+                let msg = format!("[remote_input] clipboard pre-read (for staleness check) failed: {err}");
+                eprintln!("{msg}");
+                self.logger.write(&msg);
+                None
             }
-        } else {
-            None
         };
+
+        if let Err(err) = self.write_clipboard_text("").await {
+            let msg = format!("[remote_input] clipboard pre-clear failed: {err}");
+            eprintln!("{msg}");
+            self.logger.write(&msg);
+            // Keep going -- polling can still work, just with a higher risk
+            // of the stale-content race this clear exists to prevent.
+        }
 
         // Real wall-clock time, not a count of ticks -- a single tick can
         // itself cost up to CLIPBOARD_READ_TIMEOUT_MS when the portal hangs,
@@ -441,10 +452,16 @@ impl RemoteInput {
         };
 
         if restore {
-            if let Err(err) = self
-                .write_clipboard_text(before.as_deref().unwrap_or(""))
-                .await
-            {
+            // Don't restore `previous` if it already looked like item text
+            // itself -- there's no way to tell whether that was genuinely
+            // stale leftover text or the fresh copy racing ahead of us, so
+            // restoring it would risk leaving stale item text sitting in
+            // the clipboard instead of the empty string this cleared it to.
+            let restore_value = match previous.as_deref() {
+                Some(text) if !looks_like_item_text(text) => text,
+                _ => "",
+            };
+            if let Err(err) = self.write_clipboard_text(restore_value).await {
                 let msg = format!("[remote_input] clipboard restore failed: {err}");
                 eprintln!("{msg}");
                 self.logger.write(&msg);
