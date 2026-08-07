@@ -374,6 +374,50 @@ fn build_ui(app: &Application) {
         });
     }
 
+    // Local Escape/Ctrl+W handling, mirroring real APT's OverlayWindow.ts
+    // handleExtraCommands: only fires while our surface holds keyboard focus
+    // (KeyboardMode::OnDemand, i.e. click-through off) — a different mechanism
+    // than the global-grab approach removed in df5aec9 (no portal session
+    // involved), now viable since d749d98 made local focus real.
+    {
+        let window_for_keys = window.clone();
+        let click_through_for_keys = click_through.clone();
+        let events_for_keys = backend.events.clone();
+        let price_check_open_for_keys = price_check_open.clone();
+        let price_check_locked_for_keys = price_check_locked.clone();
+        let kwin_connection_for_keys = kwin_connection.clone();
+
+        let key_controller = gtk4::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+            let is_escape = key == gtk4::gdk::Key::Escape;
+            let is_ctrl_w = key == gtk4::gdk::Key::w
+                && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
+            if !is_escape && !is_ctrl_w {
+                return glib::Propagation::Proceed;
+            }
+            let window = window_for_keys.clone();
+            let click_through = click_through_for_keys.clone();
+            let events = events_for_keys.clone();
+            let price_check_open = price_check_open_for_keys.clone();
+            let price_check_locked = price_check_locked_for_keys.clone();
+            let kwin_connection = kwin_connection_for_keys.clone();
+            glib::spawn_future_local(async move {
+                shortcuts::close_all_ui(
+                    &window,
+                    &click_through,
+                    &events,
+                    &price_check_open,
+                    &price_check_locked,
+                    &kwin_connection,
+                )
+                .await;
+            });
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_controller);
+    }
+
     let remote_input: Rc<RefCell<Option<remote_input::RemoteInput>>> = Rc::new(RefCell::new(None));
     {
         let window = window.clone();

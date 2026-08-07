@@ -194,40 +194,37 @@ live debugging aid for hotkey issues. `host_config.rs` doesn't parse
 `logKeys` at all; even if it did, we have nothing to log from, since we
 never observe the user's real keyboard either.
 
-## 6. Escape/Ctrl+W: real APT does this locally, not as a global shortcut
+## 6. Escape/Ctrl+W: real APT does this locally, not as a global shortcut — DONE
 
-Worth re-visiting now that keyboard-mode toggling is fixed. Real
-`OverlayWindow.ts`'s `handleExtraCommands` is a **local**
-`webContents.on('before-input-event')` listener — it only fires when the
-overlay window itself has input focus, which Electron's overlay trick allows
-even mid-interaction. We dropped Escape entirely (see recent commits) because
-our layer-shell surface never held keyboard focus at all, so the only path
-was an unconditional global portal grab — which is fundamentally
-unforwardable (a synthetic Escape we inject just re-triggers our own grab)
-and, when made dynamic per-popup-open, triggered a fresh KDE consent dialog
-on every single price-check open (unacceptably disruptive, see commit
-`df5aec9`).
+Implemented via a GTK `EventControllerKey` (`Capture` phase) added to
+`window` in `build_ui` (`main.rs`), matching `gdk::Key::Escape` or
+(`gdk::Key::w` + `ModifierType::CONTROL_MASK`). By GTK's normal focus-based
+event routing this only fires while our surface actually holds keyboard
+focus — i.e. `KeyboardMode::OnDemand`, which `apply_click_through_to_surface`
+(commit `d749d98`) only sets while click-through is off — the same
+precondition real `OverlayWindow.ts`'s local `before-input-event` listener
+relies on (Electron's overlay trick keeps real OS focus while interactable).
+On match, spawns `shortcuts::close_all_ui` — already the exact equivalent of
+real APT's `assertGameActive`, already `pub(crate)`, already exercised by the
+renderer's own close button and by §10's focus-regain handler, so this is
+pure reuse: no new state, no new plumbing, no visibility changes.
 
-**But**: we since fixed `apply_click_through_to_surface` to flip
-`KeyboardMode::OnDemand` whenever click-through is off (commit `d749d98`),
-specifically so typing in the UI works. That means our surface *can* now
-genuinely hold local keyboard focus while a widget is interactive — the same
-precondition real APT relies on for its local Escape handler. A GTK
-`EventControllerKey` on the window/webview, active only while it holds
-focus, could plausibly replicate real APT's exact approach without needing
-any global portal grab at all. Not attempted yet; flagging because the
-previous blocker (no local focus, ever) no longer applies.
+This is a genuinely different mechanism from the global portal grab removed
+in commit `df5aec9` (no `GlobalShortcuts` session created or torn down, so
+neither of that approach's failure modes apply: our own synthetic key
+injections aren't affected, and no per-popup-open KDE consent dialog is
+triggered).
 
-Read `handleExtraCommands` directly: the same local handler also matches
-`this.overlayKey` (default "Shift + Space") and calls `toggleActiveState`,
-*in addition to* the global `electron.globalShortcut` registration
-`Shortcuts.ts` sets up for the identical action. It's a deliberate
-redundant fallback — global shortcuts can behave oddly when the same app
-already has native OS keyboard focus on some platforms, so the overlay's
-own toggle key still works via the local path in that state. If §6 is
-picked up, binding the same local `EventControllerKey` to the
-`toggle-overlay` action (not just Escape/Ctrl+W) would be a cheap way to
-close this same redundancy gap, not just Escape.
+**Not ported**: `handleExtraCommands`'s second branch, matching
+`this.overlayKey` (default "Shift + Space") as a local fallback for the
+toggle-overlay action already bound globally. Real APT can rely on this
+because `overlayKey` is a fixed, renderer-configured value it always knows.
+Ours has no equivalent stable value — the toggle-overlay trigger is whatever
+key the user assigned in KDE System Settings (`host_config.rs` registers it
+with `preferred_trigger(None)`, no default), so there's no single key to
+bind locally without either guessing wrong or reading `kglobalshortcutsrc`
+live. Escape/Ctrl+W don't have this problem since they're fixed in real APT
+too, not user-remappable.
 
 ## 7. No game-log-driven features (`GameLogWatcher.ts`)
 
@@ -446,9 +443,10 @@ scratch later.
    reliability fix and the restoreClipboard write-back (which turned out to
    need a `SelectionTransfer` listener task, not just a "write" call — see
    §3).
-4. §6 (local Escape via focus, not global grab) — medium, unblocked since
-   commit `d749d98`, directly un-regresses a feature we had to rip out;
-   worth binding the overlay toggle key locally too while in there (see §6).
+4. ~~§6 (local Escape via focus, not global grab)~~ — done, landed as
+   scoped: an `EventControllerKey` on `window`, reusing `close_all_ui`
+   unchanged. Skipped the overlay-toggle-key local fallback (see §6) — no
+   stable key value to bind it to.
 5. §11 (tray icon, likely via `ksni`) — medium, self-contained (one new
    module), and the only real way to quit/reopen the app without a terminal —
    worth doing before this gets used outside active dev/testing. Carry the
