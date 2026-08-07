@@ -1,88 +1,23 @@
 # apt-kwin-overlay: remaining gaps vs. real Awakened Poe Trade
 
-Audit of `main/src/*` in the vendored, unmodified `awakened-poe-trade` submodule
-against what `apt-kwin-overlay`'s Rust backend actually implements. The renderer
-(Vue UI) is 100% the real, unmodified app — everything below is about the
-`main/` process we replaced.
+Audit of `main/src/*` in the vendored, unmodified `awakened-poe-trade`
+submodule against what `apt-kwin-overlay`'s Rust backend actually
+implements. The renderer (Vue UI) is 100% the real, unmodified app —
+everything below is about the `main/` process we replaced.
 
-Re-audited 2026-08-05: read every file under `main/src/*` directly (including
-several no prior pass had opened — `text-box.ts`, `Shortcuts.ts`,
-`OverlayWindow.ts`, `RemoteLogger.ts`, `ConfigStore.ts`, `file-uploads.ts`,
-`proxy.ts`, `server.ts`, `main.ts`, `GameWindow.ts`) against the current
-`src/*.rs`. §§2-4, 6-9, 11, 12 below still match; §10 has been corrected (the
-mechanism it described was backwards); §1, §5, §6, §9, §11 got new detail;
-§13 is new, covering two small differences found in files not previously
-audited (`proxy.ts`, `main.ts`).
+Items that were open gaps here and have since been closed — config-driven
+hotkeys (via KDE's own Global Shortcuts), clipboard read reliability +
+restore-on-copy, local Escape/Ctrl+W handling, in-app logger wiring, and
+resetting overlay state when PoE regains OS focus — have been removed from
+this list to keep it focused on what's actually still open. See git history
+for how each landed; the reasoning behind non-obvious decisions (e.g. why
+hotkeys are now configured in KDE System Settings instead of APT's own UI)
+is preserved as code comments at the relevant call sites (`host_config.rs`,
+`main.rs`), not duplicated here.
 
 Ordered roughly by how much it'd actually change day-to-day use, not by file.
 
-## 1. Hotkeys are hardcoded, not config-driven — DONE, but landed differently than planned
-
-Implemented: parses `CLIENT->MAIN::update-host-config`'s `cfg.shortcuts:
-ShortcutAction[]` and dynamically binds via `ashpd`'s `GlobalShortcuts`
-portal (`host_config.rs`, `shortcuts.rs`), scoped to the `copy-item` and
-`toggle-overlay` action types — the ones our `price_check()`/
-`toggle_click_through()` already implemented; the actual gap was that the
-*set of bound shortcuts* was fixed at 3.
-
-Key design departure from a straightforward port of `Shortcuts.ts`:
-confirmed empirically (checking `~/.config/kglobalshortcutsrc` live) that
-the portal has no way to silently rebind an already-granted id's trigger —
-`bind_shortcuts` only lets a brand-new id claim a trigger; calling it again
-for a known id with a different `preferred_trigger` does nothing, and
-KDE's kglobalaccel also replaces an app's *entire* grant set with whatever
-the latest call supplies rather than adding to it (the full accumulated
-list has to be resupplied every call, not just the delta). So shortcut ids
-are content-stable (action type + target + `focus_overlay`, never the
-trigger key itself) — which means the renderer's own hotkey editing no
-longer has any effect once an id is first granted. **KDE's own Global
-Shortcuts (System Settings, or `ConfigureShortcuts`) is now the one place a
-user actually assigns keys**, matching how the portal model expects
-shortcut management to work in general, not just for us. The renderer's
-Hotkeys and Item Info tabs (real, unmodified upstream Vue UI) stay
-reachable, but their content is replaced with an explanatory banner via
-injected JS (`main.rs`'s `HOTKEY_UI_INFO_JS`, `WebKitUserContentManager`)
-rather than forking the submodule.
-
-All `copy-item` targets the original UI could ever configure (price-check
-unlocked/locked, item-check, wiki/PoEDB/Craft of Exile/find-in-stash) are
-pre-registered at startup (`host_config::extra_registerable_actions`) with
-no default trigger, purely so they show up as nameable, bindable entries in
-KDE's Shortcuts KCM — otherwise there'd be no way to ever discover or
-enable them, since the renderer UI that used to expose them no longer does.
-
-Still not implemented (parsed as `ActionKind::Unsupported`, inert):
-- `paste-in-chat`, `trigger-event`, `stash-search` — closer than the
-  Rust-side gap suggests. Read `main/src/shortcuts/text-box.ts` directly:
-  `typeInChat`/`stashSearch` are just `uiohook`-style key-tap sequences
-  (`V`/`Ctrl+V`, `Enter`, `Home`, `Delete`, `Ctrl+A`, `Ctrl+F`, `ArrowUp`,
-  `Escape`) wrapped in a clipboard-save/restore. On our side:
-  `remote_input.rs::press_keys` is already a generic
-  `&[(keycode, KeyState)]` injector (`press_ctrl_c` just calls it with two
-  keys) — extending it to these sequences is mostly adding evdev keycode
-  constants and a public multi-key-tap helper, not new plumbing. Clipboard
-  *write* doesn't exist yet (`RemoteInput` only exposes
-  `read_clipboard_text`), but `ashpd::desktop::clipboard::Clipboard`
-  (already a dependency, checked `ashpd-0.13.13`'s
-  `src/desktop/clipboard.rs` directly) has `set_selection`/
-  `selection_write`/`selection_write_done` on the same session we already
-  hold — no new portal capability needed, just unused API surface. So the
-  real remaining work is: evdev keycodes for the extra keys, a generic
-  multi-tap helper, and a clipboard-write wrapper — not the "need EIS
-  text-injection + clipboard-write primitives that don't exist" blocker
-  this used to describe.
-- `ocr-text` (heist gems) — Windows-only upstream, correctly out of scope
-  regardless of platform (see §12).
-
-Also not modeled at all: `logKeys` (see §5) and `stashScroll`/`keepModKeys`
-config fields. `keepModKeys` (`Shortcuts.ts`'s `register()`/
-`pressKeysToCopyItemText`) only matters for deciding whether to reuse a
-still-physically-held modifier key vs. synthesizing the whole combo fresh —
-moot for us since we can't observe the user's physical key state either way
-(same root limitation as §4/§5) and already always synthesize a full
-Ctrl+C, matching real APT's own `keepModKeys:false` code path.
-
-## 2. Stash scroll-wheel navigation
+## 1. Stash scroll-wheel navigation
 
 Real: Ctrl+scroll while hovering the stash tab bar (not over the sidebar) taps
 Left/Right arrow to change tabs (`Shortcuts.ts`'s `uIOhook.on('wheel', ...)` +
@@ -91,63 +26,25 @@ Left/Right arrow to change tabs (`Shortcuts.ts`'s `uIOhook.on('wheel', ...)` +
 
 We have no scroll-event capture at all (libei/EIS only ever *emits* input for
 us, doesn't capture the user's real mouse wheel), and no window-bounds-based
-region logic. Not attempted.
+region logic. Not attempted. The `stashScroll` config field isn't parsed
+either — relevant if this is ever picked up.
 
-## 3. Clipboard read is fragile compared to `HostClipboard.ts` — DONE
+## 2. Hotkey actions not yet bound: paste-in-chat, trigger-event, stash-search
 
-Implemented both halves. `remote_input.rs::read_clipboard_text` now takes a
-`restore: bool` and:
-- Polls every 48ms up to ~500ms (`CLIPBOARD_POLL_DELAY_MS`/
-  `CLIPBOARD_POLL_LIMIT_MS`), validating each read against the same 10
-  language-signature prefixes as real `HostClipboard.ts`'s
-  `LANGUAGE_DETECTOR` (`ITEM_TEXT_SIGNATURES`/`looks_like_item_text`) instead
-  of the old fixed single 150ms-wait/one-read/no-validation logic.
-  `shortcuts.rs::price_check` no longer has its own separate fixed wait
-  before calling it — the poll loop's own first-tick 48ms delay replaces it.
-- `restoreClipboard`: `host_config.rs`'s `HostConfig` now parses it
-  (`parse_shortcuts` → `parse_host_config`, returning both the shortcut list
-  and this flag), threaded through a third `EventBus` channel
-  (`restore_clipboard_tx`/`rx`, mirroring `focus_game_tx`) into
-  `shortcuts.rs::spawn`, held in an `Rc<Cell<bool>>`, and read fresh at each
-  `price_check` call.
+Parsed as `ActionKind::Unsupported` (inert) in `host_config.rs`. Closer than
+it looks: `main/src/shortcuts/text-box.ts`'s `typeInChat`/`stashSearch` are
+just `uiohook`-style key-tap sequences (`V`/`Ctrl+V`, `Enter`, `Home`,
+`Delete`, `Ctrl+A`, `Ctrl+F`, `ArrowUp`, `Escape`) wrapped in a
+clipboard-save/restore. `remote_input.rs::press_keys` is already a generic
+`&[(keycode, KeyState)]` injector (`press_ctrl_c` just calls it with two
+keys), and the clipboard-write wrapper these sequences need
+(`RemoteInput::write_clipboard_text`, via `ashpd`'s `Clipboard` portal's
+`set_selection`/`selection_write`/`selection_write_done`) already exists,
+built for the clipboard-restore work. Remaining work is just evdev keycode
+constants for the extra keys and a generic multi-key-tap helper — no new
+portal capability needed.
 
-The write-back itself needed more than "call a clipboard-write function" —
-`ashpd`'s Clipboard portal has no such call. A `RemoteDesktop` session can
-only *claim ownership* of the selection (`SetSelection`) and then must
-answer `SelectionTransfer` D-Bus signals reactively via `SelectionWrite`/
-`SelectionWriteDone` whenever something tries to read the clipboard while we
-own it — so `RemoteInput::setup` now also spawns a second persistent
-listener task (own `Clipboard` handle, since `Session` isn't `Clone` but the
-transfer stream reconstructs its own `Session` per event anyway), mirroring
-the shape of the existing EIS event-loop task without sharing code with it.
-`RemoteInput` gained a `pending_clipboard_write: Rc<RefCell<Option<String>>>`
-field holding whatever we last claimed via `write_clipboard_text`, served to
-every transfer request until overwritten. Matches `HostClipboard.ts`'s own
-defensive handling of one race: if the clipboard content captured before
-polling already looks like item text itself (can't tell if that's stale
-leftover text or the fresh copy racing ahead of us), nothing is restored
-rather than risking restoring the wrong thing.
-
-Deliberately **not** ported: `HostClipboard.ts`'s KDE "prevent empty
-clipboard" / Proton 10+ marker-write workarounds — as before, no confirmed
-symptom on our portal-based capture path; still worth re-checking if stale
-reads ever show up in testing.
-
-**Verify live** (same category as this codebase's other portal-behavior
-assumptions confirmed empirically against a real KDE session, e.g. §1's
-trigger-string format, §10's `TrackerEvent::Activated` timing): whether
-`SetSelection` makes us the clipboard owner only until some other app's own
-copy naturally reclaims it, or whether it "sticks" until we call
-`SetSelection` again. Noted as a code comment on `write_clipboard_text`; if
-restoring the clipboard ever ends up shadowing the user's later copies,
-that's the mechanism to revisit.
-
-(Separately, `HostClipboard.ts` also has a `restoreShortly`/`RESTORE_AFTER`
-120ms throttle-and-restore path used only by `typeInChat`/`stashSearch` —
-not `readItemText` — so it's relevant to §1's paste-in-chat/stash-search
-work, not this one.)
-
-## 4. No hover-to-interact / hold-modifier-to-pin for the price-check popup
+## 3. No hover-to-interact / hold-modifier-to-pin for the price-check popup
 
 Real `WidgetAreaTracker.ts` continuously tracks the mouse (`uiohook`
 `mousemove`/`mousedown`) against a screen-space rectangle sent by the
@@ -161,8 +58,7 @@ We: only the distance-based auto-close is ported (`spawn_auto_close` in
 `shortcuts.rs`); hovering back into the popup doesn't re-activate anything,
 and there's no hold-to-pin since we don't have live modifier-key state
 outside of what `remote_input.rs`'s EIS events happen to report for our own
-injected keys (not the user's real keyboard). This was flagged as an explicit
-known simplification back in the original phase plan.
+injected keys (not the user's real keyboard).
 
 Real fix shape: we already receive `OVERLAY->MAIN::track-area` payloads
 nowhere (no listener) — would need a live cursor-position stream (not the
@@ -170,7 +66,7 @@ current one-shot KWin query-per-poll) to react promptly, which is a bigger
 lift than it sounds given our cursor position only comes from on-demand KWin
 scripting round-trips.
 
-## 5. No Alt-hold-to-hide-overlay (`OverlayVisibility.ts`)
+## 4. No Alt-hold-to-hide-overlay (`OverlayVisibility.ts`)
 
 Real: holding Alt (no other modifiers) makes the whole overlay invisible
 after 85ms (if currently interactable) or 275ms (if not) — lets you glance at
@@ -178,7 +74,7 @@ the game without fully closing widgets. Releasing Alt or moving the mouse
 without Alt held restores visibility. We don't implement this at all — no
 `MAIN->OVERLAY::visibility` event is ever sent from our side.
 
-Needs real-time modifier-key state (same missing piece as §4's hold-to-pin) —
+Needs real-time modifier-key state (same missing piece as §3's hold-to-pin) —
 `remote_input.rs` currently only sees modifier events tied to *our own*
 injected key presses, not a live feed of the user's actual keyboard, since
 EIS is a Sender-only context for us (see `remote_input.rs` doc comments).
@@ -189,146 +85,18 @@ unverified whether that's exposed).
 Same root limitation blocks a smaller, separate real feature: `Shortcuts.ts`
 also has a `logKeys` config flag (off some renderer Settings toggle) that,
 when on, logs every raw keydown/keyup and which action type fired to the
-Log tab (`this.logger.write('debug [Shortcuts] Keydown ...')` etc.) — a
-live debugging aid for hotkey issues. `host_config.rs` doesn't parse
-`logKeys` at all; even if it did, we have nothing to log from, since we
+Log tab — a live debugging aid for hotkey issues. `host_config.rs` doesn't
+parse `logKeys` at all; even if it did, we have nothing to log from, since we
 never observe the user's real keyboard either.
 
-## 6. Escape/Ctrl+W: real APT does this locally, not as a global shortcut — DONE
+## 5. No game-log-driven features (`GameLogWatcher.ts`)
 
-Implemented via a GTK `EventControllerKey` (`Capture` phase) added to
-`window` in `build_ui` (`main.rs`), matching `gdk::Key::Escape` or
-(`gdk::Key::w` + `ModifierType::CONTROL_MASK`). By GTK's normal focus-based
-event routing this only fires while our surface actually holds keyboard
-focus — i.e. `KeyboardMode::OnDemand`, which `apply_click_through_to_surface`
-(commit `d749d98`) only sets while click-through is off — the same
-precondition real `OverlayWindow.ts`'s local `before-input-event` listener
-relies on (Electron's overlay trick keeps real OS focus while interactable).
-On match, spawns `shortcuts::close_all_ui` — already the exact equivalent of
-real APT's `assertGameActive`, already `pub(crate)`, already exercised by the
-renderer's own close button and by §10's focus-regain handler, so this is
-pure reuse: no new state, no new plumbing, no visibility changes.
+Whisper/trade/zone-change notifications from tailing `Client.txt`. Genuinely
+separate, sizeable feature — would need a file watcher on the log path
+(`cfg.clientLog` from config) and its own event stream into
+`MAIN->CLIENT::game-log`.
 
-This is a genuinely different mechanism from the global portal grab removed
-in commit `df5aec9` (no `GlobalShortcuts` session created or torn down, so
-neither of that approach's failure modes apply: our own synthetic key
-injections aren't affected, and no per-popup-open KDE consent dialog is
-triggered).
-
-**Not ported**: `handleExtraCommands`'s second branch, matching
-`this.overlayKey` (default "Shift + Space") as a local fallback for the
-toggle-overlay action already bound globally. Real APT can rely on this
-because `overlayKey` is a fixed, renderer-configured value it always knows.
-Ours has no equivalent stable value — the toggle-overlay trigger is whatever
-key the user assigned in KDE System Settings (`host_config.rs` registers it
-with `preferred_trigger(None)`, no default), so there's no single key to
-bind locally without either guessing wrong or reading `kglobalshortcutsrc`
-live. Escape/Ctrl+W don't have this problem since they're fixed in real APT
-too, not user-remappable.
-
-## 7. No game-log-driven features (`GameLogWatcher.ts`)
-
-Whisper/trade/zone-change notifications from tailing `Client.txt`. Explicitly
-deferred in the original phase plan as "real feature, not required for hover
-item → see price." Genuinely separate, sizeable feature — would need a file
-watcher on the log path (`cfg.clientLog` from config) and its own event
-stream into `MAIN->CLIENT::game-log`.
-
-## 8. `GameConfig.ts` — actually fine to keep skipping
-
-Reads PoE's `production_Config.ini` to find the player's "advanced item
-description" keybind. Deferred originally, and confirmed here: as of PoE
-3.29, `Shortcuts.ts` hardcodes `showModsKey = 'Ctrl'` and ignores whatever
-`GameConfig` found anyway (`pressKeysToCopyItemText`'s `showModsKey`
-parameter is overwritten unconditionally, confirmed reading `Shortcuts.ts`
-directly). This file is close to dead code in the real app too now — not
-worth porting.
-
-## 9. In-app Logger is underused — Settings → Log tab is mostly empty for us — DONE, one loose end
-
-Wired `logger.write(...)` alongside the existing `eprintln!`/`println!` at
-every genuine-failure site the original audit called out: price-check's
-cursor-query/kwin-not-ready/remote-input-not-ready/clipboard-read failures
-and the shortcut-reapply failure (`shortcuts.rs`), reserved-hotkey-skip and
-bad-payload parsing (`host_config.rs`), config save failure
-(`config_store.rs`), proxy/GGG request failure (`proxy.rs`), the
-keyboard-device-not-ready warning (`remote_input.rs`), and host-app-
-registration/remote-input-setup failures (`main.rs`). Pure debug/lifecycle
-noise (connection open/close, raw EIS event dumps, per-frame geometry logs)
-was deliberately left as terminal-only — feeding those into the renderer's
-Log view would just be spam.
-
-Found `Logger::write` was actually dead code (`#[allow(dead_code)]`, never
-called) and, separately, that it only ever fed the history buffer replayed
-to a client on connect — nothing broadcast a log entry live to clients
-already connected. Fixed both: `Logger` now holds an `Arc<EventBus>` (built
-before `Logger` in `server::spawn()` so it can be handed in) and `write()`
-broadcasts `MAIN->CLIENT::log-entry` immediately, in addition to appending
-to history. `Arc<Logger>` is threaded alongside the existing `Arc<EventBus>`
-param through the same call chains §1's shortcut/config plumbing already
-established, rather than being stored as a field everywhere (`ConfigStore`,
-`proxy::handle` take it as a plain parameter; `RemoteInput` stores it since
-`press_keys` has no other way to reach it from `&self`).
-
-Loose end found this pass: real `RemoteLogger.ts`'s `write()` prefixes every
-line with a wall-clock timestamp (`` `[${new Date().toLocaleTimeString()}] message` ``)
-before storing/broadcasting it; our `logger.rs::write()` stores/broadcasts
-the raw message with no timestamp at all. Cosmetic (the Log tab just loses
-per-entry timestamps), one-line fix if picked up — format the timestamp
-prefix in `Logger::write` before touching history/broadcast.
-
-## 10. PoE *regaining* OS focus doesn't reset our overlay state — DONE
-
-Previous passes described this as "PoE losing focus doesn't reset state."
-Reading `OverlayWindow.ts::handlePoeWindowActiveChange` directly this pass
-shows the opposite direction:
-
-```ts
-private handlePoeWindowActiveChange = (isActive: boolean) => {
-  if (isActive && this.isInteractable) {
-    this.isInteractable = false
-  }
-  this.server.sendEventTo('broadcast', {
-    name: 'MAIN->OVERLAY::focus-change',
-    payload: { game: isActive, overlay: this.isInteractable, usingHotkey: this.isOverlayKeyUsed }
-  })
-  this.isOverlayKeyUsed = false
-}
-```
-
-`isInteractable` only gets forced back to `false` when `isActive` is
-**true** — i.e. when PoE *regains* OS focus (e.g. you click back into the
-game after having the locked price-check popup open while alt-tabbed to a
-browser), not when it loses focus. Losing focus only re-broadcasts
-`focus-change` with the unchanged `isInteractable` value; renderer-side
-hide-on-blur widgets react to that broadcast on their own. We currently
-never react to either transition: `click_through`/widget state just sits
-however it was left, regardless of which way PoE's focus changes.
-
-This turns out to be **cheaper to close than previously scoped**: KWin
-already gives us the exact "PoE window activated" signal this needs.
-`kwin_tracker.rs`'s `TrackerEvent::Activated` fires precisely on
-`workspace.windowActivated`, and `main.rs`'s receiver loop already special-
-cases `w.is_path_of_exile()` on that event (for monitor-follow). Adding "if
-click-through is currently off, force it back on and broadcast
-`MAIN->OVERLAY::focus-change`" to that same arm — reusing
-`set_click_through`/`shortcuts::close_all_ui`'s existing logic — replicates
-real APT's actual behavior without needing any new event source.
-
-Implemented: `main.rs`'s `TrackerEvent::Activated` arm now calls
-`shortcuts::close_all_ui` whenever `w.is_path_of_exile()` and click-through
-is currently off. `price_check_open`/`price_check_locked` (previously
-locals created inside `shortcuts::spawn`) were hoisted up to `build_ui` and
-threaded into `shortcuts::spawn` as parameters so the tracker-event handler
-can share them and call `close_all_ui` directly — this resets click-through
-*and* the price-check popup's open/locked bookkeeping together, not just
-click-through, which matters because a stale `price_check_open` would make
-the next price-check hotkey press try to *close* an already-hidden popup
-instead of opening a fresh one. `close_all_ui` is now `pub(crate)` (was
-module-private). No new event source or channel needed — both call sites
-already run on the same GTK main-loop thread.
-
-## 11. No tray icon (`AppTray.ts`)
+## 6. No tray icon (`AppTray.ts`)
 
 Real APT: a system tray icon (tooltip shows version) with a right-click menu —
 "Settings/League" (message box pointing at the in-game overlay-key hint,
@@ -364,44 +132,49 @@ don't currently handle either). "Settings/League" doesn't map cleanly since
 we don't have real APT's in-overlay Settings-access hint flow — could just
 open the browser UI instead, or drop the item.
 
-**Implementation caveat found this pass**: once "Open in Browser" exists,
-`server.rs`'s WS server can have two concurrent clients (the overlay WebView
-+ a plain browser tab), and `EventBus`'s `last_active`/`mark_active`
-tracking doesn't distinguish which one is "the overlay" — it's just
-whichever client sent something most recently. Real APT tracks this
-explicitly: `OverlayWindow.ts` keeps its own `wasUsedRecently` flag, set
-from a dedicated `CLIENT->MAIN::used-recently` payload's `isOverlay: true`
-field, and `Shortcuts.ts`'s `copy-item` handler only calls
-`assertOverlayActive()` for a `focusOverlay` action when
-`this.overlay.wasUsedRecently` is true — i.e. a locked price-check should
-only force the *overlay* interactive, not steal focus onto it because a
-separate browser tab happened to be the last thing that touched the
-WebSocket. Our `shortcuts.rs::price_check` unconditionally calls
-`set_click_through(false, ...)` for any `focus_overlay:true` action today,
-which is harmless while the overlay is the only possible client but would
-misbehave the moment §11 ships a second one. Worth carrying this
+**Implementation caveat**: once "Open in Browser" exists, `server.rs`'s WS
+server can have two concurrent clients (the overlay WebView + a plain
+browser tab), and `EventBus`'s `last_active`/`mark_active` tracking doesn't
+distinguish which one is "the overlay" — it's just whichever client sent
+something most recently. Real APT tracks this explicitly: `OverlayWindow.ts`
+keeps its own `wasUsedRecently` flag, set from a dedicated
+`CLIENT->MAIN::used-recently` payload's `isOverlay: true` field, and
+`Shortcuts.ts`'s `copy-item` handler only calls `assertOverlayActive()` for a
+`focusOverlay` action when `this.overlay.wasUsedRecently` is true — i.e. a
+locked price-check should only force the *overlay* interactive, not steal
+focus onto it because a separate browser tab happened to be the last thing
+that touched the WebSocket. Our `shortcuts.rs::price_check` unconditionally
+calls `set_click_through(false, ...)` for any `focus_overlay:true` action
+today, which is harmless while the overlay is the only possible client but
+would misbehave the moment this ships a second one. Worth carrying this
 `isOverlay`-style distinction into `EventBus` at the same time as the tray,
 not after.
 
-## 12. Not applicable / correctly out of scope, no action needed
+## 7. Not applicable / correctly out of scope, no action needed
 
 - **`AppUpdater.ts`** (real electron-updater auto-update flow) — we already
   stub this correctly (always `update-not-available`). Self-updating doesn't
-  make sense for a locally-built dev binary; leave as-is permanently, not a
-  gap to close.
-- **`vision/*`** (OCR for heist gems) — Windows-only upstream already (uses a
-  Windows-specific screenshot path), correctly out of scope regardless of our
-  platform.
+  make sense for a locally-built dev binary; leave as-is permanently.
+- **`vision/*`** (OCR for heist gems, incl. the `ocr-text` copy-item hotkey
+  action) — Windows-only upstream already (uses a Windows-specific
+  screenshot path), correctly out of scope regardless of our platform.
 - **`HostClipboard.ts`'s KDE/Proton-specific empty-clipboard workarounds** —
-  noted in the original phase plan as likely not directly applicable since
-  our capture path is portal-based, not Electron's clipboard API. Revisit
-  only if stale/empty clipboard reads actually show up in testing (haven't
-  so far).
+  likely not directly applicable since our capture path is portal-based, not
+  Electron's clipboard API. Revisit only if stale/empty clipboard reads
+  actually show up in testing (haven't so far).
+- **`GameConfig.ts`** (reads PoE's `production_Config.ini` for the player's
+  "advanced item description" keybind) — as of PoE 3.29, `Shortcuts.ts`
+  hardcodes `showModsKey = 'Ctrl'` and ignores whatever `GameConfig` found
+  anyway. Close to dead code in the real app too now; not worth porting.
+- **`keepModKeys` config field** — only matters for deciding whether to
+  reuse a still-physically-held modifier key vs. synthesizing the whole
+  combo fresh; moot for us since we can't observe the user's physical key
+  state either way (same root limitation as §3/§4) and we already always
+  synthesize a full Ctrl+C, matching real APT's own `keepModKeys:false` code
+  path.
 
-## 13. Two small differences found this pass, not previously covered
+## 8. Two small differences: proxy cookie handling, no single-instance lock
 
-Found while reading `proxy.ts` and `main.ts` directly (neither had been
-read line-by-line in a prior audit pass) against `proxy.rs`/`main.rs`.
 Neither looks urgent; noting them so they don't get re-discovered from
 scratch later.
 
@@ -433,48 +206,33 @@ scratch later.
 
 ## Suggested order if picked back up
 
-1. ~~§9 (logger wiring)~~ — done, and turned up two extra fixes along the
-   way (dead-code `write()`, no live broadcast — see §9). One loose end
-   left (missing timestamp prefix), trivial if ever picked up.
-2. ~~§10 (PoE-focus-regain resets state)~~ — done, landed as scoped: a small
-   addition to `main.rs`'s existing `TrackerEvent::Activated` handler
-   calling `shortcuts::close_all_ui`, no new event source.
-3. ~~§3 (clipboard retry/validation, restoreClipboard)~~ — done, both the
-   reliability fix and the restoreClipboard write-back (which turned out to
-   need a `SelectionTransfer` listener task, not just a "write" call — see
-   §3).
-4. ~~§6 (local Escape via focus, not global grab)~~ — done, landed as
-   scoped: an `EventControllerKey` on `window`, reusing `close_all_ui`
-   unchanged. Skipped the overlay-toggle-key local fallback (see §6) — no
-   stable key value to bind it to.
-5. §11 (tray icon, likely via `ksni`) — medium, self-contained (one new
-   module), and the only real way to quit/reopen the app without a terminal —
-   worth doing before this gets used outside active dev/testing. Carry the
-   `wasUsedRecently`/`isOverlay` distinction (see §11) into `EventBus` at
-   the same time, not as a follow-up.
-6. ~~§1 (config-driven hotkeys)~~ — done, though it landed as "centralized
-   in KDE Global Shortcuts" rather than a literal port of `Shortcuts.ts`
-   (see §1). paste-in-chat/stash-search turned out more tractable than
-   originally scoped (see §1's re-audit) but still their own pass — needs
-   new evdev keycode constants and a generic multi-tap helper; the
-   clipboard-write wrapper around `ashpd`'s `Clipboard` portal it also
-   needed now exists (`RemoteInput::write_clipboard_text`, built for §3's
-   restoreClipboard) and can be reused as-is.
-7. §4/§5 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
+1. §6 (tray icon, likely via `ksni`) — medium, self-contained (one new
+   module), and the only real way to quit/reopen the app without a
+   terminal — worth doing before this gets used outside active dev/testing.
+   Carry the `wasUsedRecently`/`isOverlay` distinction (see §6) into
+   `EventBus` at the same time, not as a follow-up.
+2. §2 (paste-in-chat/stash-search hotkey actions) — needs new evdev keycode
+   constants and a generic multi-tap helper; the clipboard-write wrapper it
+   also needs already exists (`RemoteInput::write_clipboard_text`) and can
+   be reused as-is.
+3. §3/§4 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
    view) — blocked on having a live modifier-key/cursor stream we don't
    currently have; needs its own spike to figure out whether KWin scripting
    or another portal capability can provide one before committing to an
    approach.
-8. §7 (game log watcher) — biggest standalone feature, independent of
+4. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
-9. §13 (proxy cookie handling, single-instance lock) — low priority, no
+5. §8 (proxy cookie handling, single-instance lock) — low priority, no
    confirmed real-world symptom for either; pick up opportunistically.
+
+(§1, stash scroll-wheel navigation, is deliberately left off this list —
+needs real window-bounds tracking plus scroll-event capture we don't have
+today, a bigger lift than anything above for a lower-traffic feature.)
 
 ## Productionalization: non-feature gaps
 
 Separate axis from everything above — not feature parity with upstream
-APT, just packaging/robustness of this repo's own Rust backend. Audited
-2026-08-03, re-checked 2026-08-05.
+APT, just packaging/robustness of this repo's own Rust backend.
 
 **Done**: PKGBUILD (`makepkg -si` local install on Arch/CachyOS — not
 published to AUR, registration's closed to new accounts); GitHub Actions
@@ -495,8 +253,6 @@ the real APT icon already vendored at `renderer/dist/icon.png`) — needed
 for `ashpd::register_host_app` to succeed on KDE, which looks up an
 installed app matching `APP_ID` via the portal's Registry interface.
 
-**Remaining**: nothing structural from the 2026-08-03 pass. Two small,
-low-priority items surfaced 2026-08-05 while re-auditing files not
-previously read closely — see §13 above (no single-instance lock; proxy
-doesn't forward `Set-Cookie`/has no outbound cookie jar). Neither has a
-confirmed real-world symptom.
+**Remaining**: nothing structural. Two small, low-priority items — see §8
+above (no single-instance lock; proxy doesn't forward `Set-Cookie`/has no
+outbound cookie jar). Neither has a confirmed real-world symptom.
