@@ -146,12 +146,18 @@ fn main() -> glib::ExitCode {
     // surface during any WebView scroll/animation (measured via /proc/*/stat
     // deltas) -- WebKit's own rendering stayed under 3% the whole time, so
     // this was never a WebKit/hardware-acceleration problem. Forcing the
-    // older OpenGL (ngl) renderer dropped that to ~4%. Only set as a
-    // default -- an explicit GSK_RENDERER in the environment (e.g. someone
-    // testing a driver fix) should still win.
+    // older OpenGL renderer dropped that to ~4%. Only set as a default -- an
+    // explicit GSK_RENDERER in the environment (e.g. someone testing a
+    // driver fix) should still win.
+    //
+    // The renderer's own name is "gl", not "ngl" -- confirmed live, setting
+    // "ngl" on this GTK4 version silently fails ("Gsk-WARNING: The new GL
+    // renderer has been renamed to gl") and GTK falls back to its own
+    // auto-selection, i.e. exactly the slow Vulkan path this exists to
+    // avoid. "ngl" was presumably correct on an older GTK4 release.
     if std::env::var_os("GSK_RENDERER").is_none() {
         // SAFETY: first line of main, no other threads exist yet.
-        unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+        unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     }
 
     let app = Application::builder().application_id(APP_ID).build();
