@@ -16,7 +16,7 @@ use crate::logger::Logger;
 // [env] table (set relative to the repo root); anything else needs it
 // exported explicitly, otherwise this falls back to where the PKGBUILD
 // installs it.
-fn dist_dir() -> &'static Path {
+pub(crate) fn dist_dir() -> &'static Path {
     static DIST_DIR: OnceLock<PathBuf> = OnceLock::new();
     DIST_DIR.get_or_init(|| {
         std::env::var("APT_KWIN_OVERLAY_DIST")
@@ -34,6 +34,16 @@ struct Client {
 pub struct EventBus {
     clients: Mutex<HashMap<ClientId, Arc<Client>>>,
     last_active: Mutex<Option<ClientId>>,
+    // Mirrors real APT's OverlayWindow.ts `wasUsedRecently` (default true):
+    // true when the most recent CLIENT->MAIN::used-recently event's
+    // isOverlay flag said so. The renderer sends that flag itself
+    // (isOverlay: Host.isElectron), and our overlay WebView is the only
+    // client whose user agent is spoofed to include "Electron" (main.rs) —
+    // so a plain browser tab hitting the HTTP server always reports
+    // isOverlay:false. Lets price_check (shortcuts.rs) avoid stealing
+    // click-through away from the game on behalf of a locked hotkey whose
+    // item-text payload actually went to a browser tab, not the overlay.
+    overlay_active: std::sync::atomic::AtomicBool,
     next_id: AtomicU64,
     // The renderer's own title-bar "x" button sends OVERLAY->MAIN::focus-game
     // (real APT's `assertGameActive` handler) instead of just hiding itself
@@ -53,30 +63,44 @@ pub struct EventBus {
     // above, kept separate since it's consumed independently (doesn't touch
     // apply_shortcuts's GlobalShortcuts bookkeeping).
     restore_clipboard_tx: async_channel::Sender<bool>,
+    // Carries a CLIENT->MAIN::user-action {action:"quit"} request (the
+    // renderer's own quit button, real APT's AppTray.ts listens for the
+    // same event) from the WS connection's own thread over to the GTK main
+    // loop, which owns the `Application` needed to call `app.quit()`. Same
+    // shape as the three channels above.
+    quit_tx: async_channel::Sender<()>,
 }
 
+/// `(bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx)`
+type EventBusChannels = (
+    EventBus,
+    async_channel::Receiver<()>,
+    async_channel::Receiver<Vec<ShortcutAction>>,
+    async_channel::Receiver<bool>,
+    async_channel::Receiver<()>,
+);
+
 impl EventBus {
-    pub(crate) fn new() -> (
-        Self,
-        async_channel::Receiver<()>,
-        async_channel::Receiver<Vec<ShortcutAction>>,
-        async_channel::Receiver<bool>,
-    ) {
+    pub(crate) fn new() -> EventBusChannels {
         let (focus_game_tx, focus_game_rx) = async_channel::unbounded();
         let (shortcut_config_tx, shortcut_config_rx) = async_channel::unbounded();
         let (restore_clipboard_tx, restore_clipboard_rx) = async_channel::unbounded();
+        let (quit_tx, quit_rx) = async_channel::unbounded();
         (
             Self {
                 clients: Mutex::new(HashMap::new()),
                 last_active: Mutex::new(None),
+                overlay_active: std::sync::atomic::AtomicBool::new(true),
                 next_id: AtomicU64::new(1),
                 focus_game_tx,
                 shortcut_config_tx,
                 restore_clipboard_tx,
+                quit_tx,
             },
             focus_game_rx,
             shortcut_config_rx,
             restore_clipboard_rx,
+            quit_rx,
         )
     }
 
@@ -101,6 +125,11 @@ impl EventBus {
                     drop(remaining);
                     drop(last_active);
                     self.mark_active(sole_id);
+                    // Mirrors real APT's server.ts: closing a client while
+                    // exactly one remains re-trusts it as the overlay,
+                    // rather than leaving overlay_active stuck on whatever
+                    // the closed client last reported.
+                    self.set_overlay_active(true);
                     return;
                 }
             }
@@ -109,6 +138,17 @@ impl EventBus {
 
     fn mark_active(&self, id: ClientId) {
         *self.last_active.lock().unwrap() = Some(id);
+    }
+
+    fn set_overlay_active(&self, active: bool) {
+        self.overlay_active.store(active, Ordering::Relaxed);
+    }
+
+    /// Whether the overlay WebView itself (as opposed to a plain browser
+    /// tab hitting `Open in Browser`) is the last client to report
+    /// `CLIENT->MAIN::used-recently`. See `overlay_active`'s field comment.
+    pub fn overlay_was_used_recently(&self) -> bool {
+        self.overlay_active.load(Ordering::Relaxed)
     }
 
     fn send_to(&self, client: &Arc<Client>, msg: &str) {
@@ -150,6 +190,10 @@ impl EventBus {
     fn request_restore_clipboard_update(&self, value: bool) {
         let _ = self.restore_clipboard_tx.try_send(value);
     }
+
+    fn request_quit(&self) {
+        let _ = self.quit_tx.try_send(());
+    }
 }
 
 pub struct Server {
@@ -159,13 +203,15 @@ pub struct Server {
     pub focus_game_rx: async_channel::Receiver<()>,
     pub shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
     pub restore_clipboard_rx: async_channel::Receiver<bool>,
+    pub quit_rx: async_channel::Receiver<()>,
 }
 
 pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
-    let (event_bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx) = EventBus::new();
+    let (event_bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx) =
+        EventBus::new();
     let events = Arc::new(event_bus);
     let server = Server {
         events: events.clone(),
@@ -174,6 +220,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
         focus_game_rx,
         shortcut_config_rx,
         restore_clipboard_rx,
+        quit_rx,
     };
     let config = server.config.clone();
     let logger = server.logger.clone();
@@ -296,6 +343,11 @@ fn handle_client_event(
     match name {
         "CLIENT->MAIN::used-recently" => {
             events.mark_active(from);
+            let is_overlay = payload
+                .get("isOverlay")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            events.set_overlay_active(is_overlay);
         }
         "OVERLAY->MAIN::focus-game" => {
             events.request_focus_game();
@@ -309,6 +361,11 @@ fn handle_client_event(
             );
             events.request_shortcut_update(parsed.shortcuts);
             events.request_restore_clipboard_update(parsed.restore_clipboard);
+        }
+        "CLIENT->MAIN::user-action" => {
+            if payload.get("action").and_then(Value::as_str) == Some("quit") {
+                events.request_quit();
+            }
         }
         "CLIENT->MAIN::save-config" => {
             let contents = payload

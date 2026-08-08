@@ -7,13 +7,16 @@ everything below is about the `main/` process we replaced.
 
 Items that were open gaps here and have since been closed — config-driven
 hotkeys (via KDE's own Global Shortcuts), clipboard read reliability +
-restore-on-copy, local Escape/Ctrl+W handling, in-app logger wiring, and
-resetting overlay state when PoE regains OS focus — have been removed from
-this list to keep it focused on what's actually still open. See git history
-for how each landed; the reasoning behind non-obvious decisions (e.g. why
-hotkeys are now configured in KDE System Settings instead of APT's own UI)
-is preserved as code comments at the relevant call sites (`host_config.rs`,
-`main.rs`), not duplicated here.
+restore-on-copy, local Escape/Ctrl+W handling, in-app logger wiring,
+resetting overlay state when PoE regains OS focus, and a tray icon (via
+`ksni`, with the `CLIENT->MAIN::user-action` quit wiring and the
+`isOverlay`/`wasUsedRecently` `EventBus` fix that shipped alongside it) —
+have been removed from this list to keep it focused on what's actually
+still open. See git history for how each landed; the reasoning behind
+non-obvious decisions (e.g. why hotkeys are now configured in KDE System
+Settings instead of APT's own UI) is preserved as code comments at the
+relevant call sites (`host_config.rs`, `main.rs`, `tray.rs`), not
+duplicated here.
 
 Ordered roughly by how much it'd actually change day-to-day use, not by file.
 
@@ -96,61 +99,7 @@ separate, sizeable feature — would need a file watcher on the log path
 (`cfg.clientLog` from config) and its own event stream into
 `MAIN->CLIENT::game-log`.
 
-## 6. No tray icon (`AppTray.ts`)
-
-Real APT: a system tray icon (tooltip shows version) with a right-click menu —
-"Settings/League" (message box pointing at the in-game overlay-key hint,
-since Settings only exists inside the overlay), "Open in Browser" (opens
-`http://localhost:{port}` — our exact equivalent of `--no-overlay` mode),
-"Open config folder", "Quit". Also listens for `CLIENT->MAIN::user-action`
-with `action: 'quit'` so a quit button inside the renderer's own UI works.
-We have none of this — closing the overlay window (there isn't even a
-window-close affordance right now) or Ctrl+C in the terminal are the only
-ways to exit.
-
-**GTK4-specific wrinkle**: GTK4 removed `GtkStatusIcon` outright — there is
-no built-in tray/status-icon widget anymore (GTK3 had one; it's gone). On
-Linux the modern mechanism is the freedesktop **StatusNotifierItem** D-Bus
-interface (what KDE Plasma's systray actually implements; menus go over the
-companion "dbusmenu" protocol), not anything GTK ships directly. Two viable
-paths:
-- **`ksni`** crate — a Rust StatusNotifierItem implementation (built on top
-  of `zbus`, which we already depend on). Least new surface area, handles
-  the dbusmenu plumbing for you. Likely the pragmatic choice.
-- Hand-roll the SNI + dbusmenu D-Bus interfaces ourselves via our existing
-  `zbus` dependency, matching the "everything through zbus" pattern already
-  used by `kwin_tracker.rs`. More code, no new dependency, but dbusmenu
-  specifically is fiddly to get right (nested menu items, hover/activate
-  signals) — `ksni` earns its keep here specifically to avoid that part.
-
-Menu items map straightforwardly to what we already have: "Open in Browser"
-→ open `http://127.0.0.1:{port}` (`server::spawn()` already returns the
-port), "Open config folder" → open `~/.local/share/apt-kwin-overlay`, "Quit"
-→ `app.quit()`/exit the process (also wire the existing
-`CLIENT->MAIN::user-action` `quit` case in `server.rs`'s dispatch, which we
-don't currently handle either). "Settings/League" doesn't map cleanly since
-we don't have real APT's in-overlay Settings-access hint flow — could just
-open the browser UI instead, or drop the item.
-
-**Implementation caveat**: once "Open in Browser" exists, `server.rs`'s WS
-server can have two concurrent clients (the overlay WebView + a plain
-browser tab), and `EventBus`'s `last_active`/`mark_active` tracking doesn't
-distinguish which one is "the overlay" — it's just whichever client sent
-something most recently. Real APT tracks this explicitly: `OverlayWindow.ts`
-keeps its own `wasUsedRecently` flag, set from a dedicated
-`CLIENT->MAIN::used-recently` payload's `isOverlay: true` field, and
-`Shortcuts.ts`'s `copy-item` handler only calls `assertOverlayActive()` for a
-`focusOverlay` action when `this.overlay.wasUsedRecently` is true — i.e. a
-locked price-check should only force the *overlay* interactive, not steal
-focus onto it because a separate browser tab happened to be the last thing
-that touched the WebSocket. Our `shortcuts.rs::price_check` unconditionally
-calls `set_click_through(false, ...)` for any `focus_overlay:true` action
-today, which is harmless while the overlay is the only possible client but
-would misbehave the moment this ships a second one. Worth carrying this
-`isOverlay`-style distinction into `EventBus` at the same time as the tray,
-not after.
-
-## 7. Not applicable / correctly out of scope, no action needed
+## 6. Not applicable / correctly out of scope, no action needed
 
 - **`AppUpdater.ts`** (real electron-updater auto-update flow) — we already
   stub this correctly (always `update-not-available`). Self-updating doesn't
@@ -173,7 +122,7 @@ not after.
   synthesize a full Ctrl+C, matching real APT's own `keepModKeys:false` code
   path.
 
-## 8. Two small differences: proxy cookie handling, no single-instance lock
+## 7. Two small differences: proxy cookie handling, no single-instance lock
 
 Neither looks urgent; noting them so they don't get re-discovered from
 scratch later.
@@ -206,23 +155,18 @@ scratch later.
 
 ## Suggested order if picked back up
 
-1. §6 (tray icon, likely via `ksni`) — medium, self-contained (one new
-   module), and the only real way to quit/reopen the app without a
-   terminal — worth doing before this gets used outside active dev/testing.
-   Carry the `wasUsedRecently`/`isOverlay` distinction (see §6) into
-   `EventBus` at the same time, not as a follow-up.
-2. §2 (paste-in-chat/stash-search hotkey actions) — needs new evdev keycode
+1. §2 (paste-in-chat/stash-search hotkey actions) — needs new evdev keycode
    constants and a generic multi-tap helper; the clipboard-write wrapper it
    also needs already exists (`RemoteInput::write_clipboard_text`) and can
    be reused as-is.
-3. §3/§4 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
+2. §3/§4 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
    view) — blocked on having a live modifier-key/cursor stream we don't
    currently have; needs its own spike to figure out whether KWin scripting
    or another portal capability can provide one before committing to an
    approach.
-4. §5 (game log watcher) — biggest standalone feature, independent of
+3. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
-5. §8 (proxy cookie handling, single-instance lock) — low priority, no
+4. §7 (proxy cookie handling, single-instance lock) — low priority, no
    confirmed real-world symptom for either; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —
@@ -253,6 +197,6 @@ the real APT icon already vendored at `renderer/dist/icon.png`) — needed
 for `ashpd::register_host_app` to succeed on KDE, which looks up an
 installed app matching `APP_ID` via the portal's Registry interface.
 
-**Remaining**: nothing structural. Two small, low-priority items — see §8
+**Remaining**: nothing structural. Two small, low-priority items — see §7
 above (no single-instance lock; proxy doesn't forward `Set-Cookie`/has no
 outbound cookie jar). Neither has a confirmed real-world symptom.

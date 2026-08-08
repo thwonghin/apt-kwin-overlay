@@ -486,9 +486,16 @@ async fn price_check(
         }),
     );
     price_check_open.set(true);
-    if focus_overlay {
+    if focus_overlay && events.overlay_was_used_recently() {
         // The locked popup is meant to be interacted with (read, click,
-        // copy) without the game stealing clicks underneath it.
+        // copy) without the game stealing clicks underneath it. Only do
+        // this when the overlay itself (not a plain browser tab opened via
+        // the tray's "Open in Browser") was the last client to report
+        // activity — otherwise the item-text payload above went to that
+        // browser tab, not anything the overlay is showing, and forcing
+        // click-through off here would just steal input from the game for
+        // no visible popup. Mirrors real Shortcuts.ts's own single
+        // condition (`action.focusOverlay && this.overlay.wasUsedRecently`).
         set_click_through(false, window, click_through, events);
         price_check_locked.set(true);
     } else {

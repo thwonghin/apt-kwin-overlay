@@ -6,6 +6,7 @@ mod proxy;
 mod remote_input;
 mod server;
 mod shortcuts;
+mod tray;
 mod uploads;
 mod xdg;
 
@@ -206,6 +207,38 @@ fn build_ui(app: &Application) {
         }
     };
     println!("[main] server listening on 127.0.0.1:{port}");
+
+    let tray_rx = tray::spawn();
+    {
+        let app = app.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(action) = tray_rx.recv().await {
+                match action {
+                    tray::TrayAction::OpenBrowser => {
+                        let _ = gtk4::gio::AppInfo::launch_default_for_uri(
+                            &format!("http://127.0.0.1:{port}/"),
+                            gtk4::gio::AppLaunchContext::NONE,
+                        );
+                    }
+                    tray::TrayAction::OpenConfigFolder => {
+                        let path = xdg::data_dir().join("apt-kwin-overlay");
+                        let uri = gtk4::gio::File::for_path(&path).uri();
+                        let _ = gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE);
+                    }
+                    tray::TrayAction::Quit => app.quit(),
+                }
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        let quit_rx = backend.quit_rx.clone();
+        glib::spawn_future_local(async move {
+            if quit_rx.recv().await.is_ok() {
+                app.quit();
+            }
+        });
+    }
 
     let user_content = webkit6::UserContentManager::new();
     user_content.add_script(&webkit6::UserScript::new(

@@ -58,7 +58,7 @@ Vue app), never its `main/` (the Electron process this project replaces).
 This is a working spike, not a polished release — see [WIP.md](WIP.md) for
 a detailed audit of what real APT does that we don't (yet) replicate: stash
 scroll-navigation, hover-to-interact / hold-to-pin the popup, Alt-hold-to-peek,
-a system tray icon, and game-log-driven notifications.
+and game-log-driven notifications.
 
 ## Requirements
 
