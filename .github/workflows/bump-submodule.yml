@@ -58,6 +58,12 @@ jobs:
         with:
           submodules: recursive
 
+      # Container jobs check out as a different UID than the one that owns
+      # the workspace on the host, which git's dubious-ownership check
+      # rejects by default.
+      - name: Trust the checked-out workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Bump submodule to upstream HEAD
         run: git submodule update --remote vendor/awakened-poe-trade
 
