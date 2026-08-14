@@ -64,8 +64,50 @@ jobs:
       - name: Trust the checked-out workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Record currently-pinned commit
+        id: pinned
+        run: echo "sha=$(git rev-parse HEAD:vendor/awakened-poe-trade)" >> "$GITHUB_OUTPUT"
+
       - name: Bump submodule to upstream HEAD
         run: git submodule update --remote vendor/awakened-poe-trade
+
+      - name: Detect vendor contract-surface changes
+        id: contract
+        run: |
+          # src/*.rs reimplements a slice of upstream's Electron main
+          # process (main/src/**) and the wire types it shares with the
+          # renderer (ipc/**) without a compiler enforcing the two stay in
+          # sync -- a green build here only proves both sides compile, not
+          # that message shapes/config schemas/allowlists still match.
+          # Excludes the two subtrees WIP.md documents as permanently out
+          # of scope regardless of upstream changes (AppUpdater.ts:
+          # stubbed, doesn't apply to a locally-built binary; vision/**:
+          # Windows-only OCR).
+          changed=$(git -C vendor/awakened-poe-trade diff --name-only \
+            "${{ steps.pinned.outputs.sha }}" HEAD -- 'main/src' 'ipc' \
+            ':!main/src/AppUpdater.ts' ':!main/src/vision')
+
+          if [ -n "$changed" ]; then
+            echo "title=⚠️ Bump awakened-poe-trade submodule (contract files changed — review needed)" >> "$GITHUB_OUTPUT"
+          else
+            echo "title=Bump awakened-poe-trade submodule" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "body<<BODY_EOF"
+            echo "Automated submodule bump to upstream's current HEAD."
+            echo "Renderer build and \`cargo build --release --locked\` both passed in this workflow run before this PR was opened."
+            if [ -n "$changed" ]; then
+              echo ""
+              echo "### ⚠️ Vendor contract surface changed"
+              echo "This bump touches upstream file(s) that \`src/*.rs\` reimplements the wire contract of (see README.md's module table). A green build only means both sides *compile* — it does not confirm WebSocket/IPC message shapes, the config JSON schema, or allowlists still match. Diff the file(s) below against the corresponding \`src/*.rs\` module before merging:"
+              echo ""
+              while IFS= read -r f; do
+                echo "- \`$f\`"
+              done <<< "$changed"
+            fi
+            echo "BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # After the bump, so the npm cache key reflects the lockfile the
       # bumped submodule actually ships, not the one we just replaced.
@@ -93,8 +135,5 @@ jobs:
         with:
           commit-message: "chore: bump awakened-poe-trade submodule"
           branch: bump-awakened-poe-trade
-          title: "Bump awakened-poe-trade submodule"
-          body: |
-            Automated submodule bump to upstream's current HEAD.
-            Renderer build and `cargo build --release --locked` both passed
-            in this workflow run before this PR was opened.
+          title: ${{ steps.contract.outputs.title }}
+          body: ${{ steps.contract.outputs.body }}
