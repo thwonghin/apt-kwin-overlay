@@ -6,7 +6,6 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../vendor/awakened-poe-trade/renderer"
 
 npm ci
-npm run make-index-files
 npm run build
 
 echo "renderer built at vendor/awakened-poe-trade/renderer/dist/"
